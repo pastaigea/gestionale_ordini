@@ -116,9 +116,9 @@ Deno.serve(async (req) => {
       let createdUserId: string | null = null;
       try {
         if (body.action === "invite") {
-          const redirectTo = body.redirect_to ??
+          const redirectTo =
             Deno.env.get("PASSWORD_REDIRECT_URL") ??
-            "http://localhost:5173/#/imposta-password";
+            "https://pastaigea.github.io/gestionale_ordini/";
           const { data, error } = await admin.auth.admin.inviteUserByEmail(
             email,
             {
@@ -177,9 +177,9 @@ Deno.serve(async (req) => {
 
     if (body.action === "send_reset") {
       const email = validEmail(body.email);
-      const redirectTo = body.redirect_to ??
+      const redirectTo =
         Deno.env.get("PASSWORD_REDIRECT_URL") ??
-        "http://localhost:5173/#/imposta-password";
+        "https://pastaigea.github.io/gestionale_ordini/";
       const publicClient = createPublicClient();
       const { error } = await publicClient.auth.resetPasswordForEmail(email, {
         redirectTo,
