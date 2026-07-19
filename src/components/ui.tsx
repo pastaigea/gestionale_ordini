@@ -1,5 +1,6 @@
 import { X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import type { ButtonHTMLAttributes, PropsWithChildren, ReactNode } from 'react'
 import { isSupabaseMode } from '../lib/supabase'
 
@@ -63,8 +64,15 @@ export const Modal = ({ title, description, onClose, size = 'md', children }: Mo
 
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null
+    const previousOverflow = document.body.style.overflow
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth
+    const previousPaddingRight = document.body.style.paddingRight
+
+    document.body.style.overflow = 'hidden'
+    if (scrollbarWidth > 0) document.body.style.paddingRight = `${scrollbarWidth}px`
+
     const focusable = () => Array.from(modalRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])
-    focusable()[0]?.focus()
+    window.requestAnimationFrame(() => focusable()[0]?.focus())
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
       if (event.key !== 'Tab') return
@@ -83,11 +91,13 @@ export const Modal = ({ title, description, onClose, size = 'md', children }: Mo
     document.addEventListener('keydown', onKeyDown)
     return () => {
       document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+      document.body.style.paddingRight = previousPaddingRight
       previousFocus?.focus()
     }
   }, [onClose])
 
-  return (
+  return createPortal(
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose()
     }}>
@@ -103,7 +113,8 @@ export const Modal = ({ title, description, onClose, size = 'md', children }: Mo
         </header>
         <div className="modal__body">{children}</div>
       </section>
-    </div>
+    </div>,
+    document.body,
   )
 }
 

@@ -1023,7 +1023,7 @@ const CustomerModal = ({ customer, onClose, onSaved }: { customer?: Customer; on
   }
 
   return (
-    <Modal title={customer ? 'Modifica cliente' : 'Nuovo cliente'} description={isSupabaseMode ? 'L’accesso viene gestito tramite invito o reset sicuro.' : 'Dati e credenziali sono esclusivamente fittizi nella demo.'} onClose={onClose} size="lg">
+    <Modal title={customer ? 'Modifica cliente' : 'Nuovo cliente'} description={isSupabaseMode ? 'Inserisci nome ed email del referente: l’email sarà l’utente per accedere al gestionale.' : 'Dati e credenziali sono esclusivamente fittizi nella demo.'} onClose={onClose} size="lg">
       <form className="entity-form" onSubmit={(event) => void submit(event)}>
         <fieldset><legend><Building2 size={17} /> Azienda</legend><div className="form-grid">
           <Field label="Ragione sociale" className="field--span-2"><input required value={form.companyName} onChange={(event) => change('companyName', event.target.value)} /></Field>
@@ -1032,13 +1032,14 @@ const CustomerModal = ({ customer, onClose, onSaved }: { customer?: Customer; on
           <Field label="Codice SDI"><input value={form.sdiCode} onChange={(event) => change('sdiCode', event.target.value)} /></Field>
           <Field label="PEC"><input type="email" value={form.pec} onChange={(event) => change('pec', event.target.value)} /></Field>
         </div></fieldset>
-        <fieldset><legend><Mail size={17} /> Referente e accesso</legend><div className="form-grid">
-          <Field label="Nome referente"><input required value={form.contactName} onChange={(event) => change('contactName', event.target.value)} /></Field>
+        <fieldset className="customer-access-section"><legend><Mail size={17} /> Utente e accesso al gestionale</legend><div className="form-grid">
+          {isSupabaseMode && <div className="access-user-note field--span-2"><UserRoundPlus size={20} /><span><strong>Crea l’utente del cliente</strong>Il nome identifica la persona; l’email sarà usata per entrare e ricevere l’invito a impostare la password.</span></div>}
+          <Field label="Nome e cognome utente"><input required value={form.contactName} onChange={(event) => change('contactName', event.target.value)} /></Field>
           <Field label="Telefono"><input value={form.phone} onChange={(event) => change('phone', event.target.value)} /></Field>
-          <Field label="Email"><input type="email" required value={form.email} onChange={(event) => change('email', event.target.value)} /></Field>
+          <Field label="Email di accesso" hint={isSupabaseMode ? 'Questa email diventa il nome utente del portale.' : undefined}><input type="email" required value={form.email} onChange={(event) => change('email', event.target.value)} /></Field>
           {!isSupabaseMode && <Field label="Nome utente"><input required value={form.username} onChange={(event) => change('username', event.target.value)} /></Field>}
           {!isSupabaseMode && <Field label="Password demo" hint="Solo locale; mai salvata in tabelle Supabase."><div className="input-with-icon"><KeyRound size={17} /><input type="text" minLength={8} required value={demoPassword} onChange={(event) => setDemoPassword(event.target.value)} /></div></Field>}
-          {isSupabaseMode && <div className="secure-auth-note"><ShieldCheck size={19} /><span><strong>Password protetta</strong>Usa invito o reset; le password non sono mai leggibili.</span></div>}
+          {isSupabaseMode && <div className="secure-auth-note"><ShieldCheck size={19} /><span><strong>Password tramite invito</strong>Dopo il salvataggio, l’utente riceve il link per impostarla in sicurezza.</span></div>}
           <label className="toggle-field"><input type="checkbox" disabled={isSupabaseMode && !customer} checked={form.active} onChange={(event) => change('active', event.target.checked)} /><span /><div><strong>Accesso attivo</strong><small>{isSupabaseMode && !customer ? 'Il nuovo account viene invitato attivo; potrai disattivarlo in seguito.' : 'Il cliente può entrare nel portale.'}</small></div></label>
         </div></fieldset>
         <fieldset><legend><MapPin size={17} /> Indirizzo di fatturazione</legend><AddressFields value={form.billingAddress} onChange={(key, value) => changeAddress('billingAddress', key, value)} /></fieldset>
