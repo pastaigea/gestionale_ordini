@@ -1,0 +1,80 @@
+name: Pubblica GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scarica il repository
+        uses: actions/checkout@v4
+
+      - name: Configura Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Controlla configurazione del backend
+        shell: bash
+        run: |
+          if [[ -z "$VITE_SUPABASE_URL" || -z "$VITE_SUPABASE_PUBLISHABLE_KEY" ]]; then
+            echo "Configura VITE_SUPABASE_URL e VITE_SUPABASE_PUBLISHABLE_KEY nelle variabili Actions del repository."
+            echo "Il deploy viene interrotto per evitare di pubblicare per errore la modalita demo."
+            exit 1
+          fi
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://yhhaplwheykxumdmuajg.supabase.co' }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_IbwVuU30_vuA6BltF08z_A_mCvKD57b' }}
+
+      - name: Installa dipendenze
+        run: npm ci
+
+      - name: Esegui test
+        run: npm test
+
+      - name: Verifica migrazione e calcoli database
+        run: npm run test:backend
+
+      - name: Crea il sito
+        run: npm run build
+        env:
+          VITE_APP_MODE: supabase
+          VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH || '/gestionale_ordini/' }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://yhhaplwheykxumdmuajg.supabase.co' }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_IbwVuU30_vuA6BltF08z_A_mCvKD57b' }}
+
+      - name: Verifica che il bundle non contenga segreti o anagrafiche
+        run: node scripts/check-public-bundle.mjs
+
+      - name: Configura Pages
+        uses: actions/configure-pages@v5
+
+      - name: Carica il sito generato
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Pubblica
+        id: deployment
+        uses: actions/deploy-pages@v4

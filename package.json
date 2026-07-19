@@ -1,0 +1,39 @@
+{
+  "name": "gestionale-ordini-igea",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:backend": "node scripts/test-backend.mjs",
+    "test:watch": "vitest",
+    "telegram:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-telegram.ps1"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.52.0",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.2",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.14",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^24.0.14",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "jsdom": "^26.1.0",
+    "supabase": "^2.109.1",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vitest": "^3.2.4"
+  }
+}

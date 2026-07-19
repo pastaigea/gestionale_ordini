@@ -1,0 +1,66 @@
+project_id = "gestionale-ordini-igea"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[studio]
+enabled = true
+port = 54323
+api_url = "http://127.0.0.1"
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "10MiB"
+
+[auth]
+enabled = true
+site_url = "http://localhost:5173"
+additional_redirect_urls = [
+  "http://127.0.0.1:5173/**",
+  "http://localhost:5173/**",
+  "https://pastaigea.github.io/gestionale_ordini/**"
+]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+refresh_token_reuse_interval = 10
+enable_signup = false
+minimum_password_length = 12
+
+[auth.email]
+enable_signup = false
+double_confirm_changes = true
+enable_confirmations = true
+
+[edge_runtime]
+enabled = true
+policy = "per_worker"
+inspector_port = 8083
+
+[functions.admin-users]
+verify_jwt = true
+
+[functions.telegram-dispatch]
+# This endpoint performs its own constant-time shared-secret validation.
+verify_jwt = false
+
+[functions.telegram-webhook]
+# Telegram cannot send a Supabase JWT. The function validates Telegram's
+# X-Telegram-Bot-Api-Secret-Token header and an explicit administrator allowlist.
+verify_jwt = false

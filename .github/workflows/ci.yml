@@ -1,0 +1,52 @@
+name: Verifica applicazione
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scarica il repository
+        uses: actions/checkout@v4
+
+      - name: Configura Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Installa dipendenze
+        run: npm ci
+
+      - name: Esegui test
+        run: npm test
+
+      - name: Verifica migrazione e calcoli database
+        run: npm run test:backend
+
+      - name: Verifica build locale demo
+        run: npm run build
+        env:
+          VITE_APP_MODE: demo
+          VITE_BASE_PATH: /
+
+      - name: Controlla il bundle pubblico
+        run: node scripts/check-public-bundle.mjs
+
+      - name: Verifica anche il bundle in modalita Supabase
+        run: npm run build
+        env:
+          VITE_APP_MODE: supabase
+          VITE_BASE_PATH: /gestionale_ordini/
+          VITE_SUPABASE_URL: https://placeholder.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_placeholder
+
+      - name: Controlla il bundle Supabase
+        run: node scripts/check-public-bundle.mjs
