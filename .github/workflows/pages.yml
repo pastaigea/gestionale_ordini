@@ -61,7 +61,7 @@ jobs:
         run: node scripts/check-public-bundle.mjs
 
       - name: Configura Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Carica il sito generato
         uses: actions/upload-pages-artifact@v4
