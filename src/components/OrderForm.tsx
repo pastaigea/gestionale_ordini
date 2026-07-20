@@ -388,15 +388,17 @@ export const OrderForm = ({
         </Card>
       </aside>
 
-      <div className="mobile-order-bar" aria-label="Riepilogo rapido ordine" aria-live="polite">
-        <div>
-          <strong>{euro.format(orderGross)}</strong>
-          <span>{totals.packages} {totals.packages === 1 ? 'confezione' : 'confezioni'} selezionate</span>
+      {items.length > 0 && (
+        <div className="mobile-order-bar" aria-label="Riepilogo rapido ordine" aria-live="polite">
+          <div>
+            <strong>{euro.format(orderGross)}</strong>
+            <span>{totals.packages} {totals.packages === 1 ? 'confezione' : 'confezioni'} selezionate</span>
+          </div>
+          <button type="button" onClick={openMobileCheckout}>
+            Rivedi e invia
+          </button>
         </div>
-        <button type="button" onClick={openMobileCheckout}>
-          {items.length ? 'Rivedi e invia' : 'Aggiungi prodotti'}
-        </button>
-      </div>
+      )}
     </form>
 
     {checkoutOpen && createPortal(

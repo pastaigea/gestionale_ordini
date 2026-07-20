@@ -612,7 +612,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--blue-600); box-s
   .billing-summary > div + div { border-top: 1px solid var(--line); }
 
   .order-form { gap: 14px; }
-  .order-form__main { gap: 14px; }
+  .order-form__main {
+    gap: 14px;
+    /* Consente di portare completamente sopra la barra fissa anche l'ultimo prodotto. */
+    padding-bottom: calc(104px + env(safe-area-inset-bottom));
+  }
   .order-form__section { padding: 15px; }
   .section-heading { margin-bottom: 15px; }
   .section-heading h2 { font-size: 18px; }
