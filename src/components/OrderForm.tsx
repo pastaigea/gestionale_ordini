@@ -67,6 +67,7 @@ export const OrderForm = ({
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const idempotencyKey = useRef(crypto.randomUUID())
+  const summaryRef = useRef<HTMLElement>(null)
   const [quantities, setQuantities] = useState<Record<string, number>>(() =>
     Object.fromEntries(initialOrder?.items.map((item) => [item.productId, item.quantity]) ?? []),
   )
@@ -307,7 +308,7 @@ export const OrderForm = ({
         </Card>
       </div>
 
-      <aside className="order-summary" aria-label="Riepilogo ordine">
+      <aside ref={summaryRef} className="order-summary" aria-label="Riepilogo ordine">
         <Card>
           <div className="order-summary__title">
             <span><ShoppingBasket size={19} /></span>
@@ -352,6 +353,19 @@ export const OrderForm = ({
           <p className="order-summary__legal">{legalText}</p>
         </Card>
       </aside>
+
+      <div className="mobile-order-bar" aria-label="Riepilogo rapido ordine" aria-live="polite">
+        <div>
+          <strong>{euro.format(orderGross)}</strong>
+          <span>{totals.packages} {totals.packages === 1 ? 'confezione' : 'confezioni'} selezionate</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => summaryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+        >
+          {items.length ? 'Completa ordine' : 'Vai al riepilogo'}
+        </button>
+      </div>
     </form>
   )
 }
