@@ -179,9 +179,13 @@ const NewOrderPage = ({ customerId }: { customerId: string }) => {
         discounts={db.discounts}
         deliveryFeeNet={customer.deliveryFeeMode === 'free' ? 0 : DEFAULT_DELIVERY_FEE_NET}
         onSubmit={async (draft) => {
-          if (initialOrder) await updateOrder(initialOrder.id, draft)
-          else await createOrder(customerId, draft)
-          navigate(`/cliente/ordini?esito=${initialOrder ? 'modificato' : 'creato'}`)
+          if (initialOrder) {
+            await updateOrder(initialOrder.id, draft)
+            navigate(`/cliente/ordini?esito=modificato&ordine=${initialOrder.id}`)
+            return
+          }
+          const created = await createOrder(customerId, draft)
+          navigate(`/cliente/ordini?esito=creato&ordine=${created.id}`)
         }}
         onCancel={initialOrder ? () => navigate('/cliente/ordini') : undefined}
       />
@@ -208,7 +212,7 @@ const CustomerOrders = ({ customerId }: { customerId: string }) => {
         description="Controlla stato, date, importi e dettagli di ogni ordine."
         action={<Button icon={<Plus size={18} />} onClick={() => navigate('/cliente/nuovo')}>Nuovo ordine</Button>}
       />
-      {outcome && <div className="success-banner" role="status"><CheckCircle2 size={20} /><div><strong>Ordine {outcome === 'creato' ? 'inviato' : 'aggiornato'}.</strong><span>{outcome === 'creato' ? 'Igea lo prenderà in carico al più presto.' : 'Le modifiche sono state salvate.'}</span></div></div>}
+      {outcome && <div className="success-banner success-banner--order" role="status"><CheckCircle2 size={24} /><div><strong>Ordine {outcome === 'creato' ? 'inviato correttamente' : 'aggiornato correttamente'}.</strong><span>{outcome === 'creato' ? 'Il riepilogo è aperto: Igea lo prenderà in carico al più presto.' : 'Il riepilogo aggiornato è aperto qui sotto.'}</span></div></div>}
       <Card className="table-card">
         <div className="table-card__toolbar">
           <div className="filter-tabs" role="group" aria-label="Filtra ordini">

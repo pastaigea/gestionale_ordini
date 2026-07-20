@@ -1,5 +1,6 @@
-import { CalendarDays, Check, CircleDollarSign, Minus, Package, Plus, Search, ShoppingBasket } from 'lucide-react'
-import { useMemo, useRef, useState } from 'react'
+import { CalendarDays, Check, CircleDollarSign, Minus, Package, Plus, Search, Send, ShoppingBasket, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { FormEvent } from 'react'
 import {
   calculateLineNet,
@@ -66,8 +67,9 @@ export const OrderForm = ({
   const [category, setCategory] = useState('Tutti')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [checkoutOpen, setCheckoutOpen] = useState(false)
   const idempotencyKey = useRef(crypto.randomUUID())
-  const summaryRef = useRef<HTMLElement>(null)
+  const checkoutRef = useRef<HTMLElement>(null)
   const [quantities, setQuantities] = useState<Record<string, number>>(() =>
     Object.fromEntries(initialOrder?.items.map((item) => [item.productId, item.quantity]) ?? []),
   )
@@ -176,8 +178,24 @@ export const OrderForm = ({
     if (safe > 0) setError('')
   }
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
+  useEffect(() => {
+    if (!checkoutOpen) return
+    const previousOverflow = document.body.style.overflow
+    const previousFocus = document.activeElement as HTMLElement | null
+    document.body.style.overflow = 'hidden'
+    window.requestAnimationFrame(() => checkoutRef.current?.querySelector<HTMLElement>('button, input, textarea')?.focus())
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCheckoutOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+      previousFocus?.focus()
+    }
+  }, [checkoutOpen])
+
+  const submitDraft = async () => {
     if (!items.length) {
       setError('Seleziona almeno un prodotto e indica la quantità.')
       return
@@ -205,10 +223,26 @@ export const OrderForm = ({
     }
   }
 
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    void submitDraft()
+  }
+
+  const openMobileCheckout = () => {
+    if (!items.length) {
+      setError('Aggiungi almeno un prodotto prima di continuare.')
+      document.querySelector('.product-grid')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    setError('')
+    setCheckoutOpen(true)
+  }
+
   return (
-    <form className="order-form" onSubmit={(event) => void submit(event)}>
+    <>
+    <form className="order-form" onSubmit={submit}>
       <div className="order-form__main">
-        <Card className="order-form__section">
+        <Card className="order-form__section order-form__section--catalog">
           <div className="section-heading">
             <span className="section-heading__number">1</span>
             <div><h2>Scegli i prodotti</h2><p>Indica il numero di confezioni che desideri ordinare.</p></div>
@@ -238,7 +272,7 @@ export const OrderForm = ({
           {visibleProducts.length === 0 && <p className="catalog-empty">Nessun prodotto corrisponde alla ricerca.</p>}
         </Card>
 
-        <Card className="order-form__section">
+        <Card className="order-form__section order-form__section--delivery">
           <div className="section-heading">
             <span className="section-heading__number">2</span>
             <div><h2>Consegna</h2><p>Quando ti serve l'ordine?</p></div>
@@ -274,7 +308,7 @@ export const OrderForm = ({
           </div>
         </Card>
 
-        <Card className="order-form__section">
+        <Card className="order-form__section order-form__section--payment">
           <div className="section-heading">
             <span className="section-heading__number">3</span>
             <div><h2>Pagamento</h2><p>Scegli come vuoi pagare questo ordine.</p></div>
@@ -308,7 +342,7 @@ export const OrderForm = ({
         </Card>
       </div>
 
-      <aside ref={summaryRef} className="order-summary" aria-label="Riepilogo ordine">
+      <aside className="order-summary" aria-label="Riepilogo ordine">
         <Card>
           <div className="order-summary__title">
             <span><ShoppingBasket size={19} /></span>
@@ -359,14 +393,132 @@ export const OrderForm = ({
           <strong>{euro.format(orderGross)}</strong>
           <span>{totals.packages} {totals.packages === 1 ? 'confezione' : 'confezioni'} selezionate</span>
         </div>
-        <button
-          type="button"
-          onClick={() => summaryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-        >
-          {items.length ? 'Completa ordine' : 'Vai al riepilogo'}
+        <button type="button" onClick={openMobileCheckout}>
+          {items.length ? 'Rivedi e invia' : 'Aggiungi prodotti'}
         </button>
       </div>
     </form>
+
+    {checkoutOpen && createPortal(
+      <div
+        className="mobile-checkout__backdrop"
+        role="presentation"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !submitting) setCheckoutOpen(false)
+        }}
+      >
+        <section
+          ref={checkoutRef}
+          className="mobile-checkout"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mobile-checkout-title"
+        >
+          <header className="mobile-checkout__header">
+            <div>
+              <span>Ultimo controllo</span>
+              <h2 id="mobile-checkout-title">Conferma il tuo ordine</h2>
+            </div>
+            <button type="button" onClick={() => setCheckoutOpen(false)} disabled={submitting} aria-label="Chiudi riepilogo">
+              <X size={22} />
+            </button>
+          </header>
+
+          <div className="mobile-checkout__body">
+            <div className="mobile-checkout__summary">
+              <div className="mobile-checkout__summary-heading">
+                <strong>{totals.packages} {totals.packages === 1 ? 'confezione' : 'confezioni'}</strong>
+                <span>{items.length} {items.length === 1 ? 'prodotto' : 'prodotti'}</span>
+              </div>
+              <div className="mobile-checkout__lines">
+                {items.map((item) => (
+                  <div key={item.productId}>
+                    <span><b>{item.quantity}×</b> {item.productName}</span>
+                    <strong>{euro.format(calculateLineNet(pricedItem(item)))}</strong>
+                  </div>
+                ))}
+                <div className="mobile-checkout__delivery-line">
+                  <span>Spese di trasporto</span>
+                  <strong>{deliveryFee.net === 0 ? 'Gratuito' : euro.format(deliveryFee.net)}</strong>
+                </div>
+              </div>
+            </div>
+
+            <Field label="Data di consegna richiesta" htmlFor="mobile-delivery-date" error={!date && error ? 'Scegli una data per inviare l’ordine.' : undefined}>
+              <div className="input-with-icon">
+                <CalendarDays size={18} />
+                <input
+                  id="mobile-delivery-date"
+                  type="date"
+                  min={minDeliveryDate()}
+                  value={date}
+                  onChange={(event) => {
+                    setDate(event.target.value)
+                    if (event.target.value) setError('')
+                  }}
+                  required
+                />
+              </div>
+            </Field>
+
+            <div className="mobile-checkout__payment" role="radiogroup" aria-label="Pagamento ordine">
+              <span>Pagamento</span>
+              <label className={paymentMethod === 'end_of_month' ? 'active' : ''}>
+                <input type="radio" name="mobile-payment-method" checked={paymentMethod === 'end_of_month'} onChange={() => setPaymentMethod('end_of_month')} />
+                <span>Fattura a fine mese</span>
+              </label>
+              <label className={paymentMethod === 'on_delivery' ? 'active' : ''}>
+                <input type="radio" name="mobile-payment-method" checked={paymentMethod === 'on_delivery'} onChange={() => setPaymentMethod('on_delivery')} />
+                <span>Pagamento alla consegna</span>
+              </label>
+            </div>
+
+            <Field label="Note per la consegna (facoltative)" htmlFor="mobile-order-notes" hint={`${notes.length}/300 caratteri`}>
+              <textarea
+                id="mobile-order-notes"
+                rows={2}
+                maxLength={300}
+                value={notes}
+                onChange={(event) => setNotes(event.target.value)}
+                placeholder="Orario preferito, accesso, altre indicazioni…"
+              />
+            </Field>
+
+            <Field
+              label="Codice sconto (facoltativo)"
+              htmlFor="mobile-discount-code"
+              hint={discountCode && !activeDiscount ? 'Codice non valido o non attivo.' : activeDiscount ? activeDiscount.description : 'Inseriscilo solo se comunicato da Igea.'}
+            >
+              <input
+                id="mobile-discount-code"
+                value={discountCode}
+                onChange={(event) => setDiscountCode(event.target.value.toUpperCase())}
+                placeholder="Es. SCONTO1"
+              />
+            </Field>
+
+            <div className="mobile-checkout__total">
+              <span>Totale IVA inclusa</span>
+              <strong>{euro.format(orderGross)}</strong>
+            </div>
+
+            {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
+            <p className="mobile-checkout__legal">{legalText}</p>
+          </div>
+
+          <footer className="mobile-checkout__footer">
+            <button type="button" className="mobile-checkout__edit" onClick={() => setCheckoutOpen(false)} disabled={submitting}>
+              Modifica ordine
+            </button>
+            <button type="button" className="mobile-checkout__confirm" onClick={() => void submitDraft()} disabled={submitting}>
+              {submitting ? <><span className="mobile-checkout__spinner" /> Invio in corso…</> : <><Send size={18} /> Conferma e invia</>}
+            </button>
+          </footer>
+        </section>
+      </div>,
+      document.body,
+    )}
+    </>
   )
 }
 

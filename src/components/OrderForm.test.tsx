@@ -150,4 +150,26 @@ describe('OrderForm', () => {
       })],
     }))
   })
+  it('usa un checkout mobile esplicito prima della conferma definitiva', async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    render(<OrderForm products={products} onSubmit={onSubmit} />)
+
+    await user.click(screen.getByRole('button', { name: 'Aggiungi Formato Test' }))
+    await user.click(screen.getByRole('button', { name: 'Rivedi e invia' }))
+
+    const checkout = screen.getByRole('dialog', { name: 'Conferma il tuo ordine' })
+    expect(within(checkout).getByText('1 confezione')).toBeInTheDocument()
+    await user.type(within(checkout).getByLabelText('Data di consegna richiesta'), '2026-08-01')
+    await user.click(within(checkout).getByText('Pagamento alla consegna'))
+    await user.click(within(checkout).getByRole('button', { name: 'Conferma e invia' }))
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      requestedDeliveryDate: '2026-08-01',
+      paymentMethod: 'on_delivery',
+      items: [expect.objectContaining({ productId: 'test-product', quantity: 1 })],
+    }))
+  })
+
 })

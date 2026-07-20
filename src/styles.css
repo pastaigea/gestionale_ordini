@@ -601,7 +601,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--blue-600); box-s
 }
 
 /* Mobile ordering experience */
-.mobile-order-bar { display: none; }
+.mobile-order-bar, .mobile-checkout__backdrop { display: none; }
 
 @media (max-width: 700px) {
   html { scroll-padding-bottom: 110px; }
@@ -689,6 +689,193 @@ input:focus, textarea:focus, select:focus { border-color: var(--blue-600); box-s
     font-weight: 800;
     box-shadow: 0 5px 14px rgba(32, 97, 183, .22);
   }
+
+  /* Mobile: prodotti nella pagina, consegna e conferma in un checkout chiaro. */
+  .order-form__section--delivery,
+  .order-form__section--payment,
+  .order-summary { display: none; }
+
+  .mobile-checkout__backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-top: env(safe-area-inset-top);
+    background: rgba(5, 25, 47, .58);
+    backdrop-filter: blur(3px);
+  }
+  .mobile-checkout {
+    width: 100%;
+    max-height: 94dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 22px 22px 0 0;
+    background: #fff;
+    box-shadow: 0 -16px 45px rgba(6, 34, 64, .28);
+    animation: mobile-checkout-enter .2s ease-out;
+  }
+  .mobile-checkout__header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 17px 18px 14px;
+    border-bottom: 1px solid var(--line);
+    background: #fff;
+  }
+  .mobile-checkout__header > div { min-width: 0; }
+  .mobile-checkout__header > div > span {
+    display: block;
+    margin-bottom: 3px;
+    color: var(--blue-700);
+    font-size: 10px;
+    font-weight: 850;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .mobile-checkout__header h2 { margin: 0; font-size: 20px; line-height: 1.2; }
+  .mobile-checkout__header > button {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 44px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    color: #3c5268;
+    background: #f7f9fb;
+  }
+  .mobile-checkout__header > button:disabled { opacity: .55; }
+  .mobile-checkout__body {
+    min-height: 0;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 16px 16px 22px;
+  }
+  .mobile-checkout__summary {
+    overflow: hidden;
+    border: 1px solid #dce6f0;
+    border-radius: 14px;
+    background: #f8fbfe;
+  }
+  .mobile-checkout__summary-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 13px;
+    border-bottom: 1px solid #e2eaf2;
+  }
+  .mobile-checkout__summary-heading strong { color: var(--blue-900); font-size: 14px; }
+  .mobile-checkout__summary-heading span { color: var(--muted); font-size: 11px; }
+  .mobile-checkout__lines { max-height: 190px; overflow-y: auto; padding: 4px 13px; }
+  .mobile-checkout__lines > div {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 0;
+    border-bottom: 1px dashed #dce5ee;
+    font-size: 12px;
+  }
+  .mobile-checkout__lines > div:last-child { border-bottom: 0; }
+  .mobile-checkout__lines > div > span { min-width: 0; color: #415a72; }
+  .mobile-checkout__lines > div > span b { color: var(--blue-800); }
+  .mobile-checkout__lines > div > strong { flex: 0 0 auto; color: #263f57; }
+  .mobile-checkout__delivery-line { margin-top: 2px; }
+  .mobile-checkout__payment { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .mobile-checkout__payment > span {
+    grid-column: 1 / -1;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 750;
+  }
+  .mobile-checkout__payment label {
+    min-height: 58px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 11px;
+    border: 1px solid #d8e2ec;
+    border-radius: 12px;
+    color: #41586e;
+    background: #fff;
+    font-size: 12px;
+    line-height: 1.3;
+  }
+  .mobile-checkout__payment label.active {
+    border-color: #86afe0;
+    color: var(--blue-900);
+    background: #f2f8ff;
+    box-shadow: inset 0 0 0 1px rgba(41, 104, 181, .12);
+  }
+  .mobile-checkout__payment input { min-height: auto; width: 18px; height: 18px; flex: 0 0 18px; }
+  .mobile-checkout__total {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 15px;
+    border-radius: 14px;
+    color: #fff;
+    background: var(--blue-900);
+  }
+  .mobile-checkout__total span { font-size: 13px; font-weight: 700; }
+  .mobile-checkout__total strong { font-size: 23px; }
+  .mobile-checkout__legal { margin: -4px 4px 0; color: var(--muted); font-size: 11px; line-height: 1.45; text-align: center; }
+  .mobile-checkout__footer {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, .72fr) minmax(0, 1.28fr);
+    gap: 10px;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line);
+    background: #fff;
+    box-shadow: 0 -8px 22px rgba(10, 43, 76, .09);
+  }
+  .mobile-checkout__footer button {
+    min-height: 52px;
+    border-radius: 12px;
+    font-size: 13px;
+    font-weight: 800;
+  }
+  .mobile-checkout__edit { border: 1px solid #d6e0ea; color: #41586f; background: #fff; }
+  .mobile-checkout__confirm {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: 0;
+    color: #fff;
+    background: var(--blue-700);
+    box-shadow: 0 6px 16px rgba(32, 97, 183, .25);
+  }
+  .mobile-checkout__footer button:disabled { opacity: .65; cursor: wait; }
+  .mobile-checkout__spinner {
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(255,255,255,.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: mobile-checkout-spin .7s linear infinite;
+  }
+}
+
+@keyframes mobile-checkout-enter {
+  from { transform: translateY(28px); opacity: .7; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes mobile-checkout-spin {
+  to { transform: rotate(360deg); }
 }
 
 @media (max-width: 430px) {
