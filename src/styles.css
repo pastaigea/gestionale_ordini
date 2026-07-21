@@ -890,3 +890,15 @@ input:focus, textarea:focus, select:focus { border-color: var(--blue-600); box-s
   .mobile-order-bar { padding-left: 11px; padding-right: 11px; }
   .mobile-order-bar button { padding-inline: 12px; }
 }
+
+
+/* DDT e report fatture */
+.document-table-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.report-product-breakdown { display: flex; flex-direction: column; gap: 3px; min-width: 190px; }
+.report-product-breakdown > strong { color: var(--blue-900); }
+.report-product-breakdown > small { color: var(--muted); line-height: 1.35; }
+@media (max-width: 760px) {
+  .document-table-actions { justify-content: stretch; }
+  .document-table-actions .button { flex: 1 1 90px; }
+  .report-product-breakdown { min-width: 0; }
+}

@@ -4,6 +4,7 @@ import type {
   Customer,
   Database,
   DeliveryDocument,
+  DiscountCode,
   Order,
   OrderItem,
   PaymentMethod,
@@ -200,6 +201,7 @@ const mapOrder = (value: unknown, items: OrderItem[], ddtId?: string): Order => 
     paymentMethod: normalizePaymentMethod(
       row.payment_method_snapshot ?? row.paymentMethod ?? customerSnapshot?.paymentMethod,
     ),
+    discountCode: optionalText(row.discount_code ?? row.discountCode),
     deliveryFeeNet: row.delivery_fee_net === null || row.delivery_fee_net === undefined
       ? undefined
       : number(row.delivery_fee_net),
@@ -219,6 +221,23 @@ const mapOrder = (value: unknown, items: OrderItem[], ddtId?: string): Order => 
     grossTotal: number(row.gross_total),
     customerSnapshot,
     supplierSnapshot: row.supplier_snapshot ? mapSupplierSnapshot(row.supplier_snapshot) : undefined,
+  }
+}
+
+export const mapDiscount = (value: unknown): DiscountCode => {
+  const row = asRow(value)
+  return {
+    id: text(row.id),
+    code: text(row.code).trim().toUpperCase(),
+    description: text(row.description),
+    active: row.active === undefined ? true : Boolean(row.active),
+    validUntil: optionalText(row.valid_until ?? row.validUntil),
+    productPriceOverrides: asRow(row.product_price_overrides ?? row.productPriceOverrides) as Record<string, number>,
+    productPercentDiscounts: asRow(row.product_percent_discounts ?? row.productPercentDiscounts) as Record<string, number>,
+    freeDelivery: Boolean(row.free_delivery ?? row.freeDelivery),
+    deliveryFeeNet: row.delivery_fee_net === null || row.delivery_fee_net === undefined
+      ? undefined
+      : number(row.delivery_fee_net),
   }
 }
 
@@ -296,7 +315,7 @@ export const loadSupabaseDatabase = async (
   session: SessionUser,
 ): Promise<Database> => {
   const today = localIsoDate()
-  const [customerRows, relationRows, orderRows, itemRows, documentRows, supplierResult] = await Promise.all([
+  const [customerRows, relationRows, orderRows, itemRows, documentRows, discountRows, supplierResult] = await Promise.all([
     loadAllRows(
       (from, to) => client.from('customers').select('*').order('legal_name').order('id').range(from, to),
       'Lettura clienti non riuscita',
@@ -321,6 +340,12 @@ export const loadSupabaseDatabase = async (
       },
       'Lettura DDT non riuscita',
     ),
+    session.role === 'admin'
+      ? loadAllRows(
+          (from, to) => client.from('discount_codes').select('*').order('code').range(from, to),
+          'Lettura codici sconto non riuscita',
+        )
+      : Promise.resolve([]),
     client.from('supplier_settings').select('*').eq('id', 1).maybeSingle(),
   ])
 
@@ -395,7 +420,7 @@ export const loadSupabaseDatabase = async (
     products,
     orders,
     documents,
-    discounts: [],
+    discounts: discountRows.map(mapDiscount),
     supplier: supplierResult.data ? mapSupplier(supplierResult.data) : emptySupplier(),
     demoCredentials: [],
     counters: {

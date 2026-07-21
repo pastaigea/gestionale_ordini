@@ -85,7 +85,7 @@ const drawFooter = (pdf: jsPDF, page: number, pages: number) => {
   pdf.text(`Pagina ${page} di ${pages}`, 196, pageHeight - 8, { align: 'right' })
 }
 
-export const downloadDdtPdf = async ({ document, order, customer, supplier, products = [] }: DdtPdfData) => {
+const buildDdtPdf = async ({ document, order, customer, supplier, products = [] }: DdtPdfData) => {
   const documentSupplier = document.supplierSnapshot ?? supplier
   const documentCustomer = document.customerSnapshot ?? customer
   const documentDestination = document.destinationSnapshot ?? documentCustomer.deliveryAddress
@@ -183,7 +183,7 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
   const totalWithDeliveryVat = totals.vat + deliveryFeeVat
   const tableEnd = (pdf as jsPDF & { lastAutoTable: { finalY: number } }).lastAutoTable.finalY
   let infoY = Math.max(tableEnd + 10, 125)
-  const requiredHeight = 94
+  const requiredHeight = 101
   if (infoY + requiredHeight > pageHeight - 12) {
     pdf.addPage()
     pdf.setFont('helvetica', 'bold')
@@ -196,7 +196,7 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
   const reasonLines = wrappedLines(pdf, `Causale: ${document.transportReason}`, 78)
   const carrierLines = wrappedLines(pdf, `Trasporto: ${document.carrier}`, 78)
   pdf.setDrawColor(210, 220, 232)
-  pdf.roundedRect(14, infoY, 182, 54, 2, 2, 'S')
+  pdf.roundedRect(14, infoY, 182, 61, 2, 2, 'S')
   pdf.setTextColor(30, 42, 56)
   pdf.setFont('helvetica', 'bold')
   pdf.setFontSize(8)
@@ -208,10 +208,16 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
   pdf.text(paymentText(paymentMethod), 19, infoY + 49, { maxWidth: 78 })
   pdf.text(`Colli: ${document.packages}`, 108, infoY + 14)
   pdf.text(`Ordine: ${order.number}`, 108, infoY + 24, { maxWidth: 82 })
-  pdf.text(`Totale merce: ${euro.format(totals.net)} + IVA`, 108, infoY + 34, { maxWidth: 82 })
-  pdf.text(`Trasporto: ${euro.format(deliveryFeeNet)} + IVA ${deliveryFeeVatRate}%`, 108, infoY + 40, { maxWidth: 82 })
-  pdf.text(`Totale doc.: ${euro.format(totalWithDeliveryNet)} + IVA ${euro.format(totalWithDeliveryVat)}`, 108, infoY + 46, { maxWidth: 82 })
-  pdf.text(`Inizio trasporto: ${document.transportStartedAt ? formatDateTime(document.transportStartedAt) : formatDate(document.issueDate)}`, 108, infoY + 52, { maxWidth: 82 })
+  pdf.text(`Totale merce: ${euro.format(totals.net)} + IVA`, 108, infoY + 32, { maxWidth: 82 })
+  pdf.text(`Trasporto: ${euro.format(deliveryFeeNet)} + IVA ${deliveryFeeVatRate}%`, 108, infoY + 38, { maxWidth: 82 })
+  pdf.text(`Imponibile documento: ${euro.format(totalWithDeliveryNet)}`, 108, infoY + 44, { maxWidth: 82 })
+  pdf.text(`IVA documento: ${euro.format(totalWithDeliveryVat)}`, 108, infoY + 50, { maxWidth: 82 })
+  pdf.setFont('helvetica', 'bold')
+  pdf.setTextColor(...navy)
+  pdf.text(`TOTALE COMPLESSIVO: ${euro.format(totalWithDeliveryNet + totalWithDeliveryVat)}`, 108, infoY + 57, { maxWidth: 82 })
+  pdf.setFont('helvetica', 'normal')
+  pdf.setTextColor(30, 42, 56)
+  pdf.text(`Inizio trasporto: ${document.transportStartedAt ? formatDateTime(document.transportStartedAt) : formatDate(document.issueDate)}`, 19, infoY + 57, { maxWidth: 78 })
   if ((document.revision ?? 0) > 0) {
     pdf.setFont('helvetica', 'bold')
     pdf.setTextColor(154, 83, 16)
@@ -220,7 +226,7 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
     pdf.setTextColor(30, 42, 56)
   }
 
-  const signatureY = infoY + 66
+  const signatureY = infoY + 73
   pdf.setDrawColor(160, 173, 189)
   pdf.line(14, signatureY + 12, 85, signatureY + 12)
   pdf.line(125, signatureY + 12, 196, signatureY + 12)
@@ -235,5 +241,26 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
   }
 
   const safeNumber = document.number.replace(/[^a-z0-9_-]+/gi, '-')
-  pdf.save(`${safeNumber || 'DDT'}.pdf`)
+  return { pdf, safeNumber: safeNumber || 'DDT' }
+}
+
+export const downloadDdtPdf = async (data: DdtPdfData) => {
+  const { pdf, safeNumber } = await buildDdtPdf(data)
+  pdf.save(`${safeNumber}.pdf`)
+}
+
+export const previewDdtPdf = async (data: DdtPdfData) => {
+  const previewWindow = window.open('', '_blank')
+  if (!previewWindow) throw new Error('Il browser ha bloccato l’anteprima. Abilita i popup per questo sito.')
+  previewWindow.document.title = 'Preparazione anteprima DDT…'
+  previewWindow.document.body.innerHTML = '<p style="font-family: sans-serif; padding: 24px">Preparazione anteprima DDT…</p>'
+  try {
+    const { pdf } = await buildDdtPdf(data)
+    const url = URL.createObjectURL(pdf.output('blob'))
+    previewWindow.location.href = url
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (reason) {
+    previewWindow.close()
+    throw reason
+  }
 }

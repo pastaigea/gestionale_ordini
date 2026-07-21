@@ -23,6 +23,7 @@ import {
   emptyDatabase,
   loadSupabaseDatabase,
   loadCustomerCatalog,
+  mapDiscount,
   productPayload,
   supplierPayload,
 } from '../lib/supabaseData'
@@ -117,9 +118,11 @@ interface AppContextValue {
     reason: string
   }) => Promise<void>
   setOrderStatus: (orderId: string, status: OrderStatus) => Promise<void>
+  updateOrderPaymentMethod: (orderId: string, paymentMethod: PaymentMethod) => Promise<void>
   confirmOrderPayment: (orderId: string) => Promise<void>
   issueDdt: (orderId: string) => Promise<DeliveryDocument>
   updateDeliveryFee: (documentId: string, feeNet: number) => Promise<void>
+  updateDdtMetadata: (documentId: string, draft: { number: string; issueDate: string; paymentMethod: PaymentMethod }) => Promise<void>
   saveCustomer: (customer: CustomerDraft, id?: string) => Promise<string>
   importCustomers: (customers: Array<Omit<CustomerDraft, 'paymentMethod'> & { id: string }>) => Promise<number>
   deleteCustomer: (id: string) => Promise<void>
@@ -129,6 +132,7 @@ interface AppContextValue {
   addProduct: (product: Omit<Product, 'id'>) => Promise<void>
   importProducts: (products: Omit<Product, 'id'>[]) => Promise<number>
   deleteProduct: (id: string) => Promise<void>
+  resolveDiscountCode: (code: string, customerId?: string) => Promise<DiscountCode | null>
   saveDiscount: (discount: DiscountCode) => Promise<void>
   deleteDiscount: (id: string) => Promise<void>
   saveSupplier: (supplier: SupplierSettings) => Promise<void>
@@ -395,9 +399,8 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
       throw new Error('Il trasporto viene aggiunto automaticamente e non può essere inserito come prodotto.')
     }
     if (isSupabaseMode) {
-      if (draft.discountCode) throw new Error('I codici sconto in produzione richiedono le tabelle promo Supabase.')
       const client = requireConfiguredClient()
-      const { data, error } = await client.rpc('place_order', {
+      const { data, error } = await client.rpc('place_order_with_discount', {
         p_order_id: null,
         p_requested_delivery_date: draft.requestedDeliveryDate,
         p_notes: draft.notes,
@@ -406,6 +409,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
         p_expected_version: null,
         p_customer_id: session?.role === 'admin' ? customerId : null,
         p_idempotency_key: draft.idempotencyKey ?? null,
+        p_discount_code: draft.discountCode?.trim().toUpperCase() || null,
       })
       if (error || !data) throw new Error(error?.message ?? 'Creazione ordine non riuscita.')
       const nextDb = await reloadDatabase()
@@ -459,11 +463,10 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
       throw new Error('Il trasporto viene aggiunto automaticamente e non può essere inserito come prodotto.')
     }
     if (isSupabaseMode) {
-      if (draft.discountCode) throw new Error('I codici sconto in produzione richiedono le tabelle promo Supabase.')
       const existing = db.orders.find((order) => order.id === orderId)
       if (!existing?.version) throw new Error('Versione ordine non disponibile. Aggiorna la pagina.')
       const client = requireConfiguredClient()
-      const { error } = await client.rpc('place_order', {
+      const { error } = await client.rpc('place_order_with_discount', {
         p_order_id: orderId,
         p_requested_delivery_date: draft.requestedDeliveryDate,
         p_notes: draft.notes,
@@ -472,6 +475,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
         p_expected_version: existing.version,
         p_customer_id: null,
         p_idempotency_key: null,
+        p_discount_code: draft.discountCode?.trim().toUpperCase() || null,
       })
       if (error) throw new Error(error.message)
       await reloadDatabase()
@@ -657,6 +661,55 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     }))
   }, [db.orders, reloadDatabase])
 
+  const updateOrderPaymentMethod = useCallback(async (orderId: string, paymentMethod: PaymentMethod) => {
+    if (session?.role !== 'admin') throw new Error('Solo l’amministratore può modificare il metodo di pagamento.')
+    const order = db.orders.find((item) => item.id === orderId)
+    if (!order) throw new Error('Ordine non trovato.')
+    if (!['submitted', 'accepted', 'in_delivery', 'delivered'].includes(order.status)) {
+      throw new Error('Il metodo di pagamento non può essere modificato nello stato corrente.')
+    }
+    if (order.paymentConfirmedAt && order.paymentMethod !== paymentMethod) {
+      throw new Error('Il pagamento è già stato confermato e non può essere riclassificato.')
+    }
+    if (order.paymentMethod === paymentMethod) return
+
+    if (isSupabaseMode) {
+      const client = requireConfiguredClient()
+      const { error } = await client.rpc('admin_update_order_payment_method', {
+        p_order_id: orderId,
+        p_payment_method: paymentMethod,
+      })
+      if (error) throw new Error(error.message)
+      await reloadDatabase()
+      return
+    }
+
+    const changedAt = new Date().toISOString()
+    setDb((current) => ({
+      ...current,
+      orders: current.orders.map((item) => item.id === orderId
+        ? {
+            ...item,
+            paymentMethod,
+            customerSnapshot: item.customerSnapshot
+              ? { ...item.customerSnapshot, paymentMethod }
+              : item.customerSnapshot,
+            updatedAt: changedAt,
+            version: (item.version ?? 0) + 1,
+          }
+        : item),
+      documents: current.documents.map((document) => document.orderId === orderId && document.status !== 'void'
+        ? {
+            ...document,
+            paymentMethod,
+            customerSnapshot: document.customerSnapshot
+              ? { ...document.customerSnapshot, paymentMethod }
+              : document.customerSnapshot,
+          }
+        : document),
+    }))
+  }, [db.orders, reloadDatabase, session?.role])
+
   const confirmOrderPayment = useCallback(async (orderId: string) => {
     if (session?.role !== 'admin') throw new Error('Solo l’amministratore può confermare un pagamento.')
     const order = db.orders.find((item) => item.id === orderId)
@@ -792,6 +845,70 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
       }
     })
   }, [reloadDatabase])
+
+  const updateDdtMetadata = useCallback(async (
+    documentId: string,
+    draft: { number: string; issueDate: string; paymentMethod: PaymentMethod },
+  ) => {
+    if (session?.role !== 'admin') throw new Error('Solo l’amministratore può modificare un DDT.')
+    const normalizedNumber = draft.number.trim()
+    if (!normalizedNumber) throw new Error('Il numero DDT è obbligatorio.')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(draft.issueDate)) throw new Error('Data documento non valida.')
+    if (draft.issueDate > localIsoDate()) throw new Error('La data del DDT non può essere futura.')
+
+    const selectedDocument = db.documents.find((document) => document.id === documentId)
+    if (!selectedDocument || selectedDocument.status === 'void') throw new Error('DDT non modificabile.')
+    const order = db.orders.find((item) => item.id === selectedDocument.orderId)
+    if (!order) throw new Error('Ordine collegato non trovato.')
+    if (order.paymentConfirmedAt && order.paymentMethod !== draft.paymentMethod) {
+      throw new Error('Il pagamento è già stato confermato e non può essere riclassificato.')
+    }
+
+    if (isSupabaseMode) {
+      const client = requireConfiguredClient()
+      const { error } = await client.rpc('admin_update_delivery_document_metadata', {
+        p_document_id: documentId,
+        p_display_number: normalizedNumber,
+        p_issued_on: draft.issueDate,
+        p_payment_method: draft.paymentMethod,
+      })
+      if (error) throw new Error(error.message)
+      await reloadDatabase()
+      return
+    }
+
+    setDb((current) => {
+      if (current.documents.some((document) => document.id !== documentId && document.number === normalizedNumber)) {
+        throw new Error('Esiste già un DDT con questo numero.')
+      }
+      const changedAt = new Date().toISOString()
+      return {
+        ...current,
+        documents: current.documents.map((document) => document.id === documentId
+          ? {
+              ...document,
+              number: normalizedNumber,
+              issueDate: draft.issueDate,
+              paymentMethod: draft.paymentMethod,
+              customerSnapshot: document.customerSnapshot
+                ? { ...document.customerSnapshot, paymentMethod: draft.paymentMethod }
+                : document.customerSnapshot,
+            }
+          : document),
+        orders: current.orders.map((item) => item.id === selectedDocument.orderId
+          ? {
+              ...item,
+              paymentMethod: draft.paymentMethod,
+              customerSnapshot: item.customerSnapshot
+                ? { ...item.customerSnapshot, paymentMethod: draft.paymentMethod }
+                : item.customerSnapshot,
+              updatedAt: changedAt,
+              version: (item.version ?? 0) + 1,
+            }
+          : item),
+      }
+    })
+  }, [db.documents, db.orders, reloadDatabase, session?.role])
 
   const saveCustomer = useCallback(async (draft: CustomerDraft, id?: string): Promise<string> => {
     if (isSupabaseMode) {
@@ -1008,20 +1125,71 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     }))
   }, [reloadDatabase])
 
+  const resolveDiscountCode = useCallback(async (code: string, customerId?: string): Promise<DiscountCode | null> => {
+    const normalizedCode = code.trim().toUpperCase()
+    if (!normalizedCode) return null
+    if (!isSupabaseMode) {
+      return db.discounts.find((discount) =>
+        discount.active &&
+        discount.code.toUpperCase() === normalizedCode &&
+        (!discount.validUntil || discount.validUntil >= localIsoDate()),
+      ) ?? null
+    }
+    const client = requireConfiguredClient()
+    const { data, error } = await client.rpc('resolve_discount_code', {
+      p_code: normalizedCode,
+      p_customer_id: session?.role === 'admin' ? customerId ?? null : null,
+    })
+    if (error) throw new Error(error.message)
+    const row = Array.isArray(data) ? data[0] : data
+    return row ? mapDiscount(row) : null
+  }, [db.discounts, session?.role])
+
   const saveDiscount = useCallback(async (discount: DiscountCode) => {
-    if (isSupabaseMode) throw new Error('Gli sconti in produzione richiedono le tabelle promo Supabase.')
+    const normalized: DiscountCode = {
+      ...discount,
+      id: discount.id || uid('discount'),
+      code: discount.code.trim().toUpperCase(),
+      description: discount.description.trim(),
+    }
+    if (!normalized.code) throw new Error('Il codice sconto è obbligatorio.')
+    if (isSupabaseMode) {
+      if (session?.role !== 'admin') throw new Error('Solo l’amministratore può salvare gli sconti.')
+      const client = requireConfiguredClient()
+      const { error } = await client.from('discount_codes').upsert({
+        id: normalized.id,
+        code: normalized.code,
+        description: normalized.description,
+        active: normalized.active,
+        valid_until: normalized.validUntil ?? null,
+        product_price_overrides: normalized.productPriceOverrides ?? {},
+        product_percent_discounts: normalized.productPercentDiscounts ?? {},
+        free_delivery: Boolean(normalized.freeDelivery),
+        delivery_fee_net: normalized.deliveryFeeNet ?? null,
+      }, { onConflict: 'id' })
+      if (error) throw new Error(error.message)
+      await reloadDatabase()
+      return
+    }
     setDb((current) => ({
       ...current,
-      discounts: current.discounts.some((item) => item.id === discount.id)
-        ? current.discounts.map((item) => item.id === discount.id ? discount : item)
-        : [{ ...discount, id: discount.id || uid('discount') }, ...current.discounts],
+      discounts: current.discounts.some((item) => item.id === normalized.id)
+        ? current.discounts.map((item) => item.id === normalized.id ? normalized : item)
+        : [normalized, ...current.discounts],
     }))
-  }, [])
+  }, [reloadDatabase, session?.role])
 
   const deleteDiscount = useCallback(async (id: string) => {
-    if (isSupabaseMode) throw new Error('Gli sconti in produzione richiedono le tabelle promo Supabase.')
+    if (isSupabaseMode) {
+      if (session?.role !== 'admin') throw new Error('Solo l’amministratore può eliminare gli sconti.')
+      const client = requireConfiguredClient()
+      const { error } = await client.from('discount_codes').delete().eq('id', id)
+      if (error) throw new Error(error.message)
+      await reloadDatabase()
+      return
+    }
     setDb((current) => ({ ...current, discounts: current.discounts.filter((discount) => discount.id !== id) }))
-  }, [])
+  }, [reloadDatabase, session?.role])
 
   const saveSupplier = useCallback(async (supplier: SupplierSettings) => {
     if (isSupabaseMode) {
@@ -1052,9 +1220,11 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     getCustomerCatalog,
     adjustOrderFulfillment,
     setOrderStatus,
+    updateOrderPaymentMethod,
     confirmOrderPayment,
     issueDdt,
     updateDeliveryFee,
+    updateDdtMetadata,
     saveCustomer,
     importCustomers,
     deleteCustomer,
@@ -1064,6 +1234,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     addProduct,
     importProducts,
     deleteProduct,
+    resolveDiscountCode,
     saveDiscount,
     deleteDiscount,
     saveSupplier,
@@ -1084,9 +1255,11 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     getCustomerCatalog,
     adjustOrderFulfillment,
     setOrderStatus,
+    updateOrderPaymentMethod,
     confirmOrderPayment,
     issueDdt,
     updateDeliveryFee,
+    updateDdtMetadata,
     saveCustomer,
     importCustomers,
     deleteCustomer,
@@ -1096,6 +1269,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     addProduct,
     importProducts,
     deleteProduct,
+    resolveDiscountCode,
     saveDiscount,
     deleteDiscount,
     saveSupplier,

@@ -713,6 +713,113 @@ if (fulfillmentAudit.rows[0].audit_count !== 2) {
   throw new Error(`Fulfillment audit is incomplete: ${JSON.stringify(fulfillmentAudit.rows[0])}`)
 }
 
+const discountId = 'discount-backend-test'
+await db.query(
+  `insert into public.discount_codes (
+     id, code, description, active, product_price_overrides,
+     product_percent_discounts, free_delivery
+   ) values ($1, 'TEST20', 'Sconto backend test', true, $2::jsonb, $3::jsonb, true)`,
+  [
+    discountId,
+    JSON.stringify({ [productIds['TEST-PER-UNIT']]: 1.5 }),
+    JSON.stringify({ [productIds['TEST-PER-KG']]: 20 }),
+  ],
+)
+const resolvedDiscount = await db.query(
+  `select * from public.resolve_discount_code(
+     'test20', '30000000-0000-4000-8000-000000000001'::uuid
+   )`,
+)
+if (resolvedDiscount.rows[0]?.code !== 'TEST20' || resolvedDiscount.rows[0]?.free_delivery !== true) {
+  throw new Error(`Discount resolution failed: ${JSON.stringify(resolvedDiscount.rows)}`)
+}
+
+const discountedOrderResult = await db.query(
+  `select * from public.place_order_with_discount(
+     null, current_date + 1, 'Test codice sconto', $1::jsonb,
+     'end_of_month'::public.payment_method, null,
+     '30000000-0000-4000-8000-000000000001'::uuid,
+     '40000000-0000-4000-8000-000000000099'::uuid,
+     'TEST20'
+   )`,
+  [JSON.stringify([
+    { product_id: productIds['TEST-PER-KG'], quantity: 1 },
+    { product_id: productIds['TEST-PER-UNIT'], quantity: 1 },
+  ])],
+)
+let discountedOrder = discountedOrderResult.rows[0]
+const discountedSnapshots = await db.query(
+  `select sku_snapshot, unit_price_net from public.order_items
+   where order_id = $1 order by sku_snapshot`,
+  [discountedOrder.id],
+)
+if (
+  discountedOrder.discount_code !== 'TEST20'
+  || Number(discountedOrder.delivery_fee_net) !== 0
+  || Number(discountedOrder.net_total) !== 10.34
+  || Number(discountedOrder.vat_total) !== 1.21
+  || Number(discountedOrder.gross_total) !== 11.55
+  || Number(discountedSnapshots.rows[0].unit_price_net) !== 5.896
+  || Number(discountedSnapshots.rows[1].unit_price_net) !== 1.5
+) {
+  throw new Error(`Discounted order is incorrect: ${JSON.stringify({ discountedOrder, rows: discountedSnapshots.rows })}`)
+}
+const discountedRetry = (await db.query(
+  `select * from public.place_order_with_discount(
+     null, current_date + 1, 'Test codice sconto', $1::jsonb,
+     'end_of_month'::public.payment_method, null,
+     '30000000-0000-4000-8000-000000000001'::uuid,
+     '40000000-0000-4000-8000-000000000099'::uuid,
+     'TEST20'
+   )`,
+  [JSON.stringify([
+    { product_id: productIds['TEST-PER-KG'], quantity: 1 },
+    { product_id: productIds['TEST-PER-UNIT'], quantity: 1 },
+  ])],
+)).rows[0]
+if (Number(discountedRetry.net_total) !== 10.34 || Number(discountedRetry.gross_total) !== 11.55) {
+  throw new Error(`Idempotent discount retry compounded prices: ${JSON.stringify(discountedRetry)}`)
+}
+
+discountedOrder = (await db.query(
+  `select * from public.admin_transition_order(
+     $1::uuid, 'accepted'::public.order_status, $2::integer, 'Accettazione test modifica pagamento'
+   )`,
+  [discountedOrder.id, discountedOrder.version],
+)).rows[0]
+discountedOrder = (await db.query(
+  `select * from public.admin_update_order_payment_method(
+     $1::uuid, 'on_delivery'::public.payment_method
+   )`,
+  [discountedOrder.id],
+)).rows[0]
+if (discountedOrder.payment_method_snapshot !== 'on_delivery') {
+  throw new Error(`Accepted order payment method was not updated: ${JSON.stringify(discountedOrder)}`)
+}
+const editableDdt = (await db.query(
+  `select * from public.prepare_delivery_document(
+     $1::uuid, $2::integer, 'EDIT', current_date, now(), 'Vendita',
+     '{}'::jsonb, null::jsonb, null::integer, 'DDT editabile test'
+   )`,
+  [discountedOrder.id, discountedOrder.version],
+)).rows[0]
+const editedDdt = (await db.query(
+  `select * from public.admin_update_delivery_document_metadata(
+     $1::uuid, 'DDT-TEST-ANTECEDENTE', current_date - 5,
+     'end_of_month'::public.payment_method
+   )`,
+  [editableDdt.id],
+)).rows[0]
+const editedOrder = (await db.query('select * from public.orders where id = $1', [discountedOrder.id])).rows[0]
+if (
+  editedDdt.display_number !== 'DDT-TEST-ANTECEDENTE'
+  || String(editedDdt.issued_on) !== String((await db.query('select current_date - 5 as expected_date')).rows[0].expected_date)
+  || editedDdt.payment_method_snapshot !== 'end_of_month'
+  || editedOrder.payment_method_snapshot !== 'end_of_month'
+) {
+  throw new Error(`DDT metadata update failed: ${JSON.stringify({ editedDdt, editedOrder })}`)
+}
+
 console.log(JSON.stringify({
   migration: 'ok',
   seedProducts: 3,
@@ -735,6 +842,12 @@ console.log(JSON.stringify({
     outboxCount: confirmationEvidence.rows[0].outbox_count,
     customerMethodAuditCount: paymentMethodAudit.rows[0].change_count,
     ddtSnapshot: delivery.payment_method_snapshot,
+  },
+  discountsAndDocuments: {
+    code: discountedOrder.discount_code,
+    net: Number(discountedOrder.net_total),
+    editedDdtNumber: editedDdt.display_number,
+    editedDdtPayment: editedDdt.payment_method_snapshot,
   },
   fulfillment: {
     status: fulfillmentOrder.status,

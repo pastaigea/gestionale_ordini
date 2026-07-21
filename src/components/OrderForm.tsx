@@ -36,6 +36,7 @@ interface OrderFormProps {
   defaultPaymentMethod?: PaymentMethod
   preferredProductIds?: string[]
   discounts?: DiscountCode[]
+  resolveDiscount?: (code: string) => Promise<DiscountCode | null>
   deliveryFeeNet?: number
   deliveryFeeVatRate?: number
   submitLabel?: string
@@ -51,6 +52,7 @@ export const OrderForm = ({
   defaultPaymentMethod = 'end_of_month',
   preferredProductIds = [],
   discounts = [],
+  resolveDiscount,
   deliveryFeeNet = initialOrder?.deliveryFeeNet ?? DEFAULT_DELIVERY_FEE_NET,
   deliveryFeeVatRate = initialOrder?.deliveryFeeVatRate ?? DEFAULT_DELIVERY_FEE_VAT_RATE,
   submitLabel,
@@ -63,6 +65,8 @@ export const OrderForm = ({
   const [notes, setNotes] = useState(initialOrder?.notes ?? '')
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(initialOrder?.paymentMethod ?? defaultPaymentMethod)
   const [discountCode, setDiscountCode] = useState(initialOrder?.discountCode ?? '')
+  const [resolvedDiscount, setResolvedDiscount] = useState<DiscountCode | null>(null)
+  const [discountValidation, setDiscountValidation] = useState<'idle' | 'checking' | 'valid' | 'invalid'>('idle')
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('Tutti')
   const [error, setError] = useState('')
@@ -125,16 +129,20 @@ export const OrderForm = ({
       left.name.localeCompare(right.name, 'it'),
     )
 
-  const activeDiscount = discounts.find((discount) =>
+  const normalizedDiscountCode = discountCode.trim().toUpperCase()
+  const localDiscount = discounts.find((discount) =>
     discount.active &&
-    discount.code.toUpperCase() === discountCode.trim().toUpperCase() &&
+    discount.code.toUpperCase() === normalizedDiscountCode &&
     (!discount.validUntil || discount.validUntil >= new Date().toISOString().slice(0, 10)),
   )
+  const activeDiscount = localDiscount ?? (
+    resolvedDiscount?.code.toUpperCase() === normalizedDiscountCode ? resolvedDiscount : undefined
+  )
 
-  const items = useMemo<OrderItem[]>(() => catalogProducts
+  const buildItems = (discount?: DiscountCode) => catalogProducts
     .filter((product) => (quantities[product.id] ?? 0) > 0)
     .map((product) => {
-      const unitPrice = resolveProductUnitPrice(product, activeDiscount)
+      const unitPrice = resolveProductUnitPrice(product, discount)
       return {
         productId: product.id,
         sku: product.sku,
@@ -146,7 +154,9 @@ export const OrderForm = ({
         packageSize: product.packageSize,
         pricingMode: product.pricingMode ?? 'per_unit',
       } as PricedOrderItem
-    }), [activeDiscount, catalogProducts, quantities])
+    })
+
+  const items = useMemo<OrderItem[]>(() => buildItems(activeDiscount), [activeDiscount, catalogProducts, quantities])
 
   const totals = calculateOrderTotals({ items })
   const effectiveDeliveryFeeNet = resolveDeliveryFeeNet(deliveryFeeNet, activeDiscount)
@@ -195,8 +205,55 @@ export const OrderForm = ({
     }
   }, [checkoutOpen])
 
+  const validateDiscount = async (): Promise<DiscountCode | null> => {
+    const code = discountCode.trim().toUpperCase()
+    if (!code) {
+      setResolvedDiscount(null)
+      setDiscountValidation('idle')
+      return null
+    }
+    if (localDiscount) {
+      setResolvedDiscount(localDiscount)
+      setDiscountValidation('valid')
+      return localDiscount
+    }
+    if (!resolveDiscount) {
+      setResolvedDiscount(null)
+      setDiscountValidation('invalid')
+      return null
+    }
+    setDiscountValidation('checking')
+    try {
+      const discount = await resolveDiscount(code)
+      setResolvedDiscount(discount)
+      setDiscountValidation(discount ? 'valid' : 'invalid')
+      return discount
+    } catch (reason) {
+      setResolvedDiscount(null)
+      setDiscountValidation('invalid')
+      setError(reason instanceof Error ? reason.message : 'Verifica del codice sconto non riuscita.')
+      return null
+    }
+  }
+
+  const discountHint = discountValidation === 'checking'
+    ? 'Verifica del codice in corso…'
+    : discountValidation === 'invalid' && normalizedDiscountCode
+      ? 'Codice non valido, scaduto o non attivo.'
+      : activeDiscount
+        ? activeDiscount.description || 'Codice sconto applicato.'
+        : 'Inseriscilo solo se comunicato dal venditore.'
+
   const submitDraft = async () => {
-    if (!items.length) {
+    const validatedDiscount = normalizedDiscountCode
+      ? activeDiscount ?? await validateDiscount()
+      : null
+    if (normalizedDiscountCode && !validatedDiscount) {
+      setError('Il codice sconto non è valido o non è più attivo.')
+      return
+    }
+    const submittedItems = validatedDiscount === activeDiscount ? items : buildItems(validatedDiscount ?? undefined)
+    if (!submittedItems.length) {
       setError('Seleziona almeno un prodotto e indica la quantità.')
       return
     }
@@ -215,7 +272,7 @@ export const OrderForm = ({
     setSubmitting(true)
     setError('')
     try {
-      await onSubmit({ requestedDeliveryDate: date, notes: notes.trim(), paymentMethod, discountCode: activeDiscount?.code, items, idempotencyKey: idempotencyKey.current })
+      await onSubmit({ requestedDeliveryDate: date, notes: notes.trim(), paymentMethod, discountCode: validatedDiscount?.code, items: submittedItems, idempotencyKey: idempotencyKey.current })
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Invio non riuscito. Riprova tra poco.')
     } finally {
@@ -302,8 +359,8 @@ export const OrderForm = ({
                 placeholder="Orario preferito, accesso, altre indicazioni…"
               />
             </Field>
-            <Field label="Codice sconto" htmlFor="discount-code" hint={discountCode && !activeDiscount ? 'Codice non valido o non attivo.' : activeDiscount ? activeDiscount.description : 'Inseriscilo solo se comunicato dal venditore.'}>
-              <input id="discount-code" value={discountCode} onChange={(event) => setDiscountCode(event.target.value.toUpperCase())} placeholder="Es. SCONTO1" />
+            <Field label="Codice sconto" htmlFor="discount-code" hint={discountHint}>
+              <input id="discount-code" value={discountCode} onChange={(event) => { setDiscountCode(event.target.value.toUpperCase()); setResolvedDiscount(null); setDiscountValidation('idle') }} onBlur={() => void validateDiscount()} placeholder="Es. SCONTO1" />
             </Field>
           </div>
         </Card>
@@ -489,12 +546,13 @@ export const OrderForm = ({
             <Field
               label="Codice sconto (facoltativo)"
               htmlFor="mobile-discount-code"
-              hint={discountCode && !activeDiscount ? 'Codice non valido o non attivo.' : activeDiscount ? activeDiscount.description : 'Inseriscilo solo se comunicato da Igea.'}
+              hint={discountHint}
             >
               <input
                 id="mobile-discount-code"
                 value={discountCode}
-                onChange={(event) => setDiscountCode(event.target.value.toUpperCase())}
+                onChange={(event) => { setDiscountCode(event.target.value.toUpperCase()); setResolvedDiscount(null); setDiscountValidation('idle') }}
+                onBlur={() => void validateDiscount()}
                 placeholder="Es. SCONTO1"
               />
             </Field>

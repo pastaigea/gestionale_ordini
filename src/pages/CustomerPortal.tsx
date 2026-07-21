@@ -151,7 +151,7 @@ const CurrentOrder = ({ order, onOpen }: { order: Order; onOpen: () => void }) =
 }
 
 const NewOrderPage = ({ customerId }: { customerId: string }) => {
-  const { db, createOrder, updateOrder } = useApp()
+  const { db, createOrder, updateOrder, resolveDiscountCode } = useApp()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const editId = searchParams.get('modifica')
@@ -177,6 +177,7 @@ const NewOrderPage = ({ customerId }: { customerId: string }) => {
         defaultPaymentMethod="end_of_month"
         preferredProductIds={customer.usualProductIds ?? []}
         discounts={db.discounts}
+        resolveDiscount={(code) => resolveDiscountCode(code, customerId)}
         deliveryFeeNet={customer.deliveryFeeMode === 'free' ? 0 : DEFAULT_DELIVERY_FEE_NET}
         onSubmit={async (draft) => {
           if (initialOrder) {

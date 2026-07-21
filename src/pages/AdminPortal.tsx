@@ -68,7 +68,7 @@ import {
   resolveProductUnitPrice,
   validPromoPercent,
 } from '../lib/commerce'
-import { downloadDdtPdf } from '../lib/pdf'
+import { downloadDdtPdf, previewDdtPdf } from '../lib/pdf'
 import {
   isPaymentConfirmationDue,
   paymentMethodLabel,
@@ -208,7 +208,7 @@ const AdminStat = ({ icon, label, value, change, tone }: { icon: React.ReactNode
 )
 
 const AdminNewOrder = () => {
-  const { db, createOrder, getCustomerCatalog } = useApp()
+  const { db, createOrder, getCustomerCatalog, resolveDiscountCode } = useApp()
   const navigate = useNavigate()
   const [customerId, setCustomerId] = useState('')
   const [catalog, setCatalog] = useState<Product[]>([])
@@ -274,6 +274,7 @@ const AdminNewOrder = () => {
           defaultPaymentMethod={customer.paymentMethod ?? 'end_of_month'}
           preferredProductIds={customer.usualProductIds ?? []}
           discounts={db.discounts}
+          resolveDiscount={(code) => resolveDiscountCode(code, customer.id)}
           deliveryFeeNet={customer.deliveryFeeMode === 'free' ? 0 : DEFAULT_DELIVERY_FEE_NET}
           summaryTitle={`Ordine di ${customer.companyName}`}
           submitLabel="Registra ordine"
@@ -294,11 +295,12 @@ const AdminNewOrder = () => {
 }
 
 const AdminOrders = () => {
-  const { db, setOrderStatus, issueDdt, confirmOrderPayment, adjustOrderFulfillment } = useApp()
+  const { db, setOrderStatus, issueDdt, updateOrderPaymentMethod, confirmOrderPayment, adjustOrderFulfillment } = useApp()
   const navigate = useNavigate()
   const initialOrderId = new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('ordine')
   const [selectedId, setSelectedId] = useState<string | null>(initialOrderId)
   const [editingFulfillmentId, setEditingFulfillmentId] = useState<string | null>(null)
+  const [editingPaymentOrderId, setEditingPaymentOrderId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all')
   const [notice, setNotice] = useState('')
@@ -454,11 +456,25 @@ const AdminOrders = () => {
               {selected.status === 'accepted' && !document && <Button disabled={busyOrderId === selected.id} icon={<FilePlus2 size={16} />} onClick={() => void createDdt(selected)}>{busyOrderId === selected.id ? 'Emissione…' : 'Emetti DDT'}</Button>}
               {selected.status === 'in_delivery' && <Button disabled={busyOrderId === selected.id} variant="success" icon={<PackageCheck size={16} />} onClick={() => void changeStatus(selected, 'delivered')}>Segna consegnato</Button>}
               {isPaymentConfirmationDue(selected) && <Button disabled={busyOrderId === selected.id} variant="success" icon={<CircleDollarSign size={16} />} onClick={() => void confirmPayment(selected)}>{busyOrderId === selected.id ? 'Conferma…' : 'Conferma pagamento'}</Button>}
+              {['submitted', 'accepted', 'in_delivery', 'delivered'].includes(selected.status) && !selected.paymentConfirmedAt && <Button variant="secondary" icon={<CircleDollarSign size={16} />} onClick={() => { setSelectedId(null); setEditingPaymentOrderId(selected.id) }}>Modifica pagamento</Button>}
               {['submitted', 'accepted', 'in_delivery', 'delivered'].includes(selected.status) && !selected.paymentConfirmedAt && <Button variant="secondary" icon={<Pencil size={16} />} onClick={() => { setSelectedId(null); setEditingFulfillmentId(selected.id) }}>Modifica quantità</Button>}
               {document && <Button disabled={downloadingDdtId === document.id} variant="secondary" icon={<Download size={16} />} onClick={() => void downloadDdt(document, selected, customer)}>{downloadingDdtId === document.id ? 'Preparazione…' : 'Scarica DDT'}</Button>}
             </>}
           />
         )
+      })()}
+      {editingPaymentOrderId && (() => {
+        const order = db.orders.find((item) => item.id === editingPaymentOrderId)
+        if (!order) return null
+        return <OrderPaymentModal
+          order={order}
+          onClose={() => setEditingPaymentOrderId(null)}
+          onSave={async (paymentMethod) => {
+            await updateOrderPaymentMethod(order.id, paymentMethod)
+            setEditingPaymentOrderId(null)
+            setNotice(`Metodo di pagamento di ${order.number} aggiornato.`)
+          }}
+        />
       })()}
       {editingFulfillmentId && (() => {
         const order = db.orders.find((item) => item.id === editingFulfillmentId)
@@ -484,11 +500,13 @@ const AdminOrders = () => {
 }
 
 const AdminDocuments = () => {
-  const { db, issueDdt, updateDeliveryFee } = useApp()
+  const { db, issueDdt, updateDeliveryFee, updateDdtMetadata } = useApp()
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [issuing, setIssuing] = useState<string | null>(null)
   const [downloading, setDownloading] = useState<string | null>(null)
+  const [previewing, setPreviewing] = useState<string | null>(null)
+  const [editingDocument, setEditingDocument] = useState<DeliveryDocument | null>(null)
   const eligibleOrders = db.orders.filter((order) => order.status === 'accepted' && !order.ddtId)
   const voidDocuments = db.documents.filter((document) => document.status === 'void').length
 
@@ -519,6 +537,20 @@ const AdminDocuments = () => {
     }
   }
 
+  const preview = async (document: DeliveryDocument) => {
+    const order = db.orders.find((item) => item.id === document.orderId)!
+    const customer = db.customers.find((item) => item.id === document.customerId)!
+    setPreviewing(document.id)
+    setError('')
+    try {
+      await previewDdtPdf({ document, order, customer, supplier: db.supplier, products: db.products })
+    } catch (reason) {
+      setError(operationError(reason))
+    } finally {
+      setPreviewing(null)
+    }
+  }
+
   const saveDeliveryFee = async (document: DeliveryDocument, feeNet: number) => {
     setError('')
     try {
@@ -533,7 +565,7 @@ const AdminDocuments = () => {
   const currentYear = new Date().getFullYear()
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Documenti" title="Documenti di trasporto" description="Emetti DDT progressivi e scaricali in formato PDF." />
+      <PageHeader eyebrow="Documenti" title="Documenti di trasporto" description="Emetti, controlla, modifica e visualizza i DDT prima di scaricarli." />
       <DemoNotice>Numerazione corrente demo: <strong>{currentYear}/{String(db.counters.ddtByYear[currentYear] ?? 0).padStart(4, '0')}</strong>. In produzione il progressivo deve essere assegnato in modo atomico dal database.</DemoNotice>
       {notice && <div className="success-banner" role="status"><CheckCircle2 size={20} /><div><strong>Documenti aggiornati</strong><span>{notice}</span></div><button onClick={() => setNotice('')} aria-label="Chiudi"><X size={17} /></button></div>}
       {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
@@ -560,11 +592,16 @@ const AdminDocuments = () => {
         <div className="table-card__title"><div><h2>Archivio DDT</h2><p>{db.documents.length} documenti generati{voidDocuments ? ` · ${voidDocuments} annullati e sostituiti` : ''}</p></div></div>
         <div className="table-wrap">
           <table className="data-table responsive-table">
-            <thead><tr><th>Documento</th><th>Cliente</th><th>Ordine</th><th>Data emissione</th><th>Colli</th><th>Stato</th><th>Trasporto</th><th><span className="sr-only">Azioni</span></th></tr></thead>
+            <thead><tr><th>Documento</th><th>Cliente</th><th>Ordine</th><th>Data emissione</th><th>Colli</th><th>Totale</th><th>Stato</th><th>Trasporto</th><th><span className="sr-only">Azioni</span></th></tr></thead>
             <tbody>
               {db.documents.map((document) => {
                 const customer = db.customers.find((item) => item.id === document.customerId)
                 const order = db.orders.find((item) => item.id === document.orderId)
+                const documentTotal = order ? calculateOrderTotals({
+                  items: document.itemsSnapshot ?? order.items,
+                  deliveryFeeNet: document.deliveryFeeNet ?? order.deliveryFeeNet ?? DEFAULT_DELIVERY_FEE_NET,
+                  deliveryFeeVatRate: document.deliveryFeeVatRate ?? order.deliveryFeeVatRate ?? 22,
+                }).gross : 0
                 return (
                   <tr key={document.id}>
                     <td data-label="Documento"><strong className="document-number"><FileText size={17} />{document.number}</strong></td>
@@ -572,12 +609,17 @@ const AdminDocuments = () => {
                     <td data-label="Ordine">{order?.number}</td>
                     <td data-label="Data emissione">{formatDate(document.issueDate)}</td>
                     <td data-label="Colli">{document.packages}</td>
+                    <td data-label="Totale"><strong>{euro.format(documentTotal)}</strong><small className="cell-subline">IVA inclusa</small></td>
                     <td data-label="Stato"><span className={document.status === 'void' ? 'active-pill' : 'active-pill active-pill--yes'}><span />{document.status === 'void' ? 'Annullato' : (document.revision ?? 0) > 0 ? `Sostitutivo rev. ${document.revision}` : 'Valido'}</span></td>
                     <td data-label="Trasporto">
                       <DeliveryFeeInput document={document} onSave={(feeNet) => saveDeliveryFee(document, feeNet)} />
                       <small className="cell-subline">+ IVA {document.deliveryFeeVatRate ?? 22}%</small>
                     </td>
-                    <td className="table-actions"><Button size="sm" variant="secondary" icon={<Download size={16} />} disabled={document.status === 'void' || downloading === document.id} onClick={() => void download(document)}>{document.status === 'void' ? 'Sostituito' : downloading === document.id ? 'Attendi…' : 'PDF'}</Button></td>
+                    <td className="table-actions document-table-actions">
+                      <Button size="sm" variant="secondary" icon={<Eye size={16} />} disabled={document.status === 'void' || previewing === document.id} onClick={() => void preview(document)}>{previewing === document.id ? 'Apertura…' : 'Vedi'}</Button>
+                      <Button size="sm" variant="secondary" icon={<Edit3 size={16} />} disabled={document.status === 'void'} onClick={() => setEditingDocument(document)}>Modifica</Button>
+                      <Button size="sm" variant="secondary" icon={<Download size={16} />} disabled={document.status === 'void' || downloading === document.id} onClick={() => void download(document)}>{document.status === 'void' ? 'Sostituito' : downloading === document.id ? 'Attendi…' : 'PDF'}</Button>
+                    </td>
                   </tr>
                 )
               })}
@@ -586,8 +628,86 @@ const AdminDocuments = () => {
           {!db.documents.length && <EmptyState icon={<FileText size={29} />} title="Archivio vuoto" description="I documenti emessi compariranno qui." />}
         </div>
       </Card>
+      {editingDocument && <DdtMetadataModal
+        document={editingDocument}
+        order={db.orders.find((item) => item.id === editingDocument.orderId)}
+        onClose={() => setEditingDocument(null)}
+        onSave={async (draft) => {
+          await updateDdtMetadata(editingDocument.id, draft)
+          setEditingDocument(null)
+          setNotice(`Dati di ${draft.number} aggiornati.`)
+        }}
+      />}
     </div>
   )
+}
+
+const OrderPaymentModal = ({ order, onClose, onSave }: {
+  order: Order
+  onClose: () => void
+  onSave: (paymentMethod: Order['paymentMethod']) => Promise<void>
+}) => {
+  const [paymentMethod, setPaymentMethod] = useState(order.paymentMethod)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  return <Modal title={`Pagamento ${order.number}`} description="La modifica si applica anche al DDT già emesso." onClose={onClose}>
+    <form className="entity-form" onSubmit={async (event) => {
+      event.preventDefault()
+      setSaving(true)
+      setError('')
+      try {
+        await onSave(paymentMethod)
+      } catch (reason) {
+        setError(operationError(reason))
+      } finally {
+        setSaving(false)
+      }
+    }}>
+      <Field label="Metodo di pagamento">
+        <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as Order['paymentMethod'])}>
+          <option value="end_of_month">Fatturazione a fine mese</option>
+          <option value="on_delivery">Pagamento alla consegna</option>
+        </select>
+      </Field>
+      {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
+      <footer className="entity-form__footer"><Button type="button" variant="ghost" disabled={saving} onClick={onClose}>Annulla</Button><Button type="submit" disabled={saving} icon={<Check size={17} />}>{saving ? 'Salvataggio…' : 'Salva pagamento'}</Button></footer>
+    </form>
+  </Modal>
+}
+
+const DdtMetadataModal = ({ document, order, onClose, onSave }: {
+  document: DeliveryDocument
+  order?: Order
+  onClose: () => void
+  onSave: (draft: { number: string; issueDate: string; paymentMethod: Order['paymentMethod'] }) => Promise<void>
+}) => {
+  const [number, setNumber] = useState(document.number)
+  const [issueDate, setIssueDate] = useState(document.issueDate)
+  const [paymentMethod, setPaymentMethod] = useState(document.paymentMethod ?? order?.paymentMethod ?? 'end_of_month')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  return <Modal title={`Modifica ${document.number}`} description="Puoi correggere numero, data e pagamento anche dopo l’emissione." onClose={onClose}>
+    <form className="entity-form" onSubmit={async (event) => {
+      event.preventDefault()
+      setSaving(true)
+      setError('')
+      try {
+        await onSave({ number: number.trim(), issueDate, paymentMethod })
+      } catch (reason) {
+        setError(operationError(reason))
+      } finally {
+        setSaving(false)
+      }
+    }}>
+      <div className="form-grid">
+        <Field label="Numero DDT"><input required maxLength={80} value={number} onChange={(event) => setNumber(event.target.value)} /></Field>
+        <Field label="Data documento" hint="Può essere antecedente alla data odierna."><input required type="date" max={new Date().toISOString().slice(0, 10)} value={issueDate} onChange={(event) => setIssueDate(event.target.value)} /></Field>
+        <Field label="Metodo di pagamento" className="field--span-2"><select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as Order['paymentMethod'])}><option value="end_of_month">Fatturazione a fine mese</option><option value="on_delivery">Pagamento alla consegna</option></select></Field>
+      </div>
+      {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
+      <footer className="entity-form__footer"><Button type="button" variant="ghost" disabled={saving} onClick={onClose}>Annulla</Button><Button type="submit" disabled={saving} icon={<Check size={17} />}>{saving ? 'Salvataggio…' : 'Salva modifiche'}</Button></footer>
+    </form>
+  </Modal>
 }
 
 const DeliveryFeeInput = ({ document, onSave }: {
@@ -656,12 +776,17 @@ const AdminInvoiceReports = () => {
         </div>
         <div className="table-wrap">
           <table className="data-table responsive-table">
-            <thead><tr><th>Cliente</th><th>Kg/formati</th><th>Consegne</th><th>Pagato consegna</th><th>Totale imponibile</th><th>Sconto manuale</th></tr></thead>
+            <thead><tr><th>Cliente</th><th>Kg venduti per formato</th><th>Consegne</th><th>Pagato consegna</th><th>Totale imponibile</th><th>Sconto manuale</th></tr></thead>
             <tbody>
               {reports.map((report) => (
                 <tr key={report.customer.id} className={selected?.customer.id === report.customer.id ? 'table-row--selected' : ''} onClick={() => setSelectedCustomerId(report.customer.id)}>
                   <td data-label="Cliente"><button className="table-primary" onClick={() => setSelectedCustomerId(report.customer.id)}>{report.customer.companyName}<small>{report.customer.vatNumber}</small></button></td>
-                  <td data-label="Kg/formati">{report.products.reduce((sum, row) => sum + row.kg, 0).toFixed(2)} kg · {report.products.length} formati</td>
+                  <td data-label="Kg venduti per formato">
+                    <div className="report-product-breakdown">
+                      <strong>{report.products.reduce((sum, row) => sum + row.kg, 0).toFixed(2)} kg totali</strong>
+                      {report.products.map((row) => <small key={row.sku ?? row.productName}>{row.productName}: {row.kg.toFixed(2)} kg</small>)}
+                    </div>
+                  </td>
                   <td data-label="Consegne">{report.deliveryCount}</td>
                   <td data-label="Pagato consegna">{euro.format(report.paidOnDeliveryNet)}</td>
                   <td data-label="Totale imponibile"><strong>{euro.format(report.totalNet - (discounts[report.customer.id] ?? 0))}</strong></td>
@@ -827,6 +952,7 @@ const ProductPromotionModal = ({ product, onClose, onSaved }: {
 const DiscountModal = ({ discount, products, onClose, onSaved }: { discount: DiscountCode; products: Product[]; onClose: () => void; onSaved: (discount: DiscountCode) => Promise<void> }) => {
   const [form, setForm] = useState(discount)
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
   const changeProductPrice = (productId: string, value: string) => setForm((current) => {
     const productPriceOverrides = { ...current.productPriceOverrides }
     if (value === '') delete productPriceOverrides[productId]
@@ -841,7 +967,18 @@ const DiscountModal = ({ discount, products, onClose, onSaved }: { discount: Dis
   })
   return (
     <Modal title={discount.code ? `Sconto ${discount.code}` : 'Nuovo sconto'} description="Definisci prezzo prodotto e trasporto per il codice promo." onClose={onClose} size="lg">
-      <form className="entity-form" onSubmit={async (event) => { event.preventDefault(); setSaving(true); await onSaved({ ...form, code: form.code.trim().toUpperCase() }); setSaving(false) }}>
+      <form className="entity-form" onSubmit={async (event) => {
+        event.preventDefault()
+        setSaving(true)
+        setError('')
+        try {
+          await onSaved({ ...form, code: form.code.trim().toUpperCase() })
+        } catch (reason) {
+          setError(operationError(reason))
+        } finally {
+          setSaving(false)
+        }
+      }}>
         <div className="form-grid">
           <Field label="Codice"><input required value={form.code} onChange={(event) => setForm((current) => ({ ...current, code: event.target.value.toUpperCase() }))} /></Field>
           <Field label="Valido fino"><input type="date" value={form.validUntil ?? ''} onChange={(event) => setForm((current) => ({ ...current, validUntil: event.target.value || undefined }))} /></Field>
@@ -860,6 +997,7 @@ const DiscountModal = ({ discount, products, onClose, onSaved }: { discount: Dis
             </div>
           ))}
         </div>
+        {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
         <footer className="entity-form__footer"><Button type="button" variant="ghost" disabled={saving} onClick={onClose}>Annulla</Button><Button type="submit" disabled={saving} icon={<Check size={17} />}>{saving ? 'Salvataggio...' : 'Salva sconto'}</Button></footer>
       </form>
     </Modal>

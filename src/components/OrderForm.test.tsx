@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { OrderForm } from './OrderForm'
@@ -164,7 +164,7 @@ describe('OrderForm', () => {
     await user.click(within(checkout).getByText('Pagamento alla consegna'))
     await user.click(within(checkout).getByRole('button', { name: 'Conferma e invia' }))
 
-    expect(onSubmit).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       requestedDeliveryDate: '2026-08-01',
       paymentMethod: 'on_delivery',
