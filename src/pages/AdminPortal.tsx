@@ -967,37 +967,58 @@ const DiscountModal = ({ discount, products, onClose, onSaved }: { discount: Dis
   })
   return (
     <Modal title={discount.code ? `Sconto ${discount.code}` : 'Nuovo sconto'} description="Definisci prezzo prodotto e trasporto per il codice promo." onClose={onClose} size="lg">
-      <form className="entity-form" onSubmit={async (event) => {
+      <form className="entity-form" noValidate onSubmit={async (event) => {
         event.preventDefault()
-        setSaving(true)
         setError('')
+        const normalizedCode = form.code.trim().toUpperCase()
+        if (normalizedCode.length < 2) {
+          setError('Inserisci un codice sconto di almeno 2 caratteri.')
+          return
+        }
+        const invalidPrice = Object.entries(form.productPriceOverrides ?? {}).find(([, value]) => !Number.isFinite(value) || value < 0)
+        if (invalidPrice) {
+          const product = products.find((item) => item.id === invalidPrice[0])
+          setError(`Il prezzo impostato per ${product?.name ?? 'un prodotto'} non è valido.`)
+          return
+        }
+        const invalidPercent = Object.entries(form.productPercentDiscounts ?? {}).find(([, value]) => !Number.isFinite(value) || value < 0 || value > 100)
+        if (invalidPercent) {
+          const product = products.find((item) => item.id === invalidPercent[0])
+          setError(`La percentuale impostata per ${product?.name ?? 'un prodotto'} deve essere compresa tra 0 e 100.`)
+          return
+        }
+        if (form.deliveryFeeNet !== undefined && (!Number.isFinite(form.deliveryFeeNet) || form.deliveryFeeNet < 0)) {
+          setError('Il prezzo del trasporto non è valido.')
+          return
+        }
+        setSaving(true)
         try {
-          await onSaved({ ...form, code: form.code.trim().toUpperCase() })
+          await onSaved({ ...form, code: normalizedCode })
         } catch (reason) {
           setError(operationError(reason))
         } finally {
           setSaving(false)
         }
       }}>
+        {error && <div className="form-alert form-alert--error" role="alert" aria-live="assertive">{error}</div>}
         <div className="form-grid">
           <Field label="Codice"><input required value={form.code} onChange={(event) => setForm((current) => ({ ...current, code: event.target.value.toUpperCase() }))} /></Field>
           <Field label="Valido fino"><input type="date" value={form.validUntil ?? ''} onChange={(event) => setForm((current) => ({ ...current, validUntil: event.target.value || undefined }))} /></Field>
           <Field label="Descrizione" className="field--span-2"><input value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} /></Field>
           <label className="toggle-field"><input type="checkbox" checked={form.active} onChange={(event) => setForm((current) => ({ ...current, active: event.target.checked }))} /><span /><div><strong>Sconto attivo</strong><small>Puoi disattivarlo senza cancellarlo.</small></div></label>
           <label className="toggle-field"><input type="checkbox" checked={Boolean(form.freeDelivery)} onChange={(event) => setForm((current) => ({ ...current, freeDelivery: event.target.checked }))} /><span /><div><strong>Trasporto gratuito</strong><small>Il cliente non paga il trasporto.</small></div></label>
-          <Field label="Prezzo trasporto personalizzato" hint="Lascia vuoto per usare 3,50 euro."><input type="number" min="0" step="0.01" value={form.deliveryFeeNet ?? ''} onChange={(event) => setForm((current) => ({ ...current, deliveryFeeNet: event.target.value ? Number(event.target.value) : undefined }))} /></Field>
+          <Field label="Prezzo trasporto personalizzato" hint="Lascia vuoto per usare 3,50 euro."><input type="number" min="0" step="any" value={form.deliveryFeeNet ?? ''} onChange={(event) => setForm((current) => ({ ...current, deliveryFeeNet: event.target.value ? Number(event.target.value) : undefined }))} /></Field>
         </div>
         <div className="discount-product-grid discount-product-grid--two-fields">
           {products.filter((product) => product.active && !isDeliveryService(product)).map((product) => (
             <div className="discount-product-row" key={product.id}>
               <strong>{product.name}</strong>
               <small>Listino {euro.format(product.price)}{product.pricingMode === 'per_kg' ? '/kg' : ''}</small>
-              <label><span>% sconto</span><input type="number" min="0" max="100" step="0.1" value={form.productPercentDiscounts?.[product.id] ?? ''} onChange={(event) => changeProductPercent(product.id, event.target.value)} placeholder="10" /></label>
-              <label><span>Prezzo nuovo</span><input type="number" min="0" step="0.01" value={form.productPriceOverrides[product.id] ?? ''} onChange={(event) => changeProductPrice(product.id, event.target.value)} placeholder="5,00" /></label>
+              <label><span>% sconto</span><input type="number" min="0" max="100" step="any" value={form.productPercentDiscounts?.[product.id] ?? ''} onChange={(event) => changeProductPercent(product.id, event.target.value)} placeholder="10" /></label>
+              <label><span>Prezzo nuovo</span><input type="number" min="0" step="any" value={form.productPriceOverrides[product.id] ?? ''} onChange={(event) => changeProductPrice(product.id, event.target.value)} placeholder="5,00" /></label>
             </div>
           ))}
         </div>
-        {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
         <footer className="entity-form__footer"><Button type="button" variant="ghost" disabled={saving} onClick={onClose}>Annulla</Button><Button type="submit" disabled={saving} icon={<Check size={17} />}>{saving ? 'Salvataggio...' : 'Salva sconto'}</Button></footer>
       </form>
     </Modal>

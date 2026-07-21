@@ -1151,24 +1151,35 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
       id: discount.id || uid('discount'),
       code: discount.code.trim().toUpperCase(),
       description: discount.description.trim(),
+      productPriceOverrides: discount.productPriceOverrides ?? {},
+      productPercentDiscounts: discount.productPercentDiscounts ?? {},
     }
     if (!normalized.code) throw new Error('Il codice sconto è obbligatorio.')
     if (isSupabaseMode) {
       if (session?.role !== 'admin') throw new Error('Solo l’amministratore può salvare gli sconti.')
       const client = requireConfiguredClient()
-      const { error } = await client.from('discount_codes').upsert({
-        id: normalized.id,
-        code: normalized.code,
-        description: normalized.description,
-        active: normalized.active,
-        valid_until: normalized.validUntil ?? null,
-        product_price_overrides: normalized.productPriceOverrides ?? {},
-        product_percent_discounts: normalized.productPercentDiscounts ?? {},
-        free_delivery: Boolean(normalized.freeDelivery),
-        delivery_fee_net: normalized.deliveryFeeNet ?? null,
-      }, { onConflict: 'id' })
-      if (error) throw new Error(error.message)
-      await reloadDatabase()
+      const { data, error } = await client.rpc('admin_save_discount_code', {
+        p_id: normalized.id || null,
+        p_code: normalized.code,
+        p_description: normalized.description,
+        p_active: normalized.active,
+        p_valid_until: normalized.validUntil ?? null,
+        p_product_price_overrides: normalized.productPriceOverrides,
+        p_product_percent_discounts: normalized.productPercentDiscounts,
+        p_free_delivery: Boolean(normalized.freeDelivery),
+        p_delivery_fee_net: normalized.deliveryFeeNet ?? null,
+      })
+      if (error) throw new Error(`Salvataggio sconto non riuscito: ${error.message}`)
+      const row = Array.isArray(data) ? data[0] : data
+      if (!row) throw new Error('Supabase non ha restituito lo sconto salvato.')
+      const saved = mapDiscount(row)
+      setDb((current) => ({
+        ...current,
+        discounts: current.discounts.some((item) => item.id === saved.id)
+          ? current.discounts.map((item) => item.id === saved.id ? saved : item)
+          : [saved, ...current.discounts.filter((item) => item.code !== saved.code)],
+      }))
+      void reloadDatabase().catch(() => undefined)
       return
     }
     setDb((current) => ({
