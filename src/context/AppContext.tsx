@@ -301,9 +301,17 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
 
   useEffect(() => {
     if (!isSupabaseMode || !session) return
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') void reloadDatabase().catch(() => undefined)
+
+    const isCustomerEditingOrder = () => {
+      const route = `${window.location.pathname}${window.location.hash}`
+      return route.includes('/cliente/nuovo')
     }
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== 'visible' || isCustomerEditingOrder()) return
+      void reloadDatabase().catch(() => undefined)
+    }
+
     const interval = window.setInterval(refreshWhenVisible, 30_000)
     window.addEventListener('focus', refreshWhenVisible)
     return () => {
