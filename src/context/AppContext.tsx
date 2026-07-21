@@ -304,7 +304,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
 
     const isCustomerEditingOrder = () => {
       const route = `${window.location.pathname}${window.location.hash}`
-      return route.includes('/cliente/nuovo')
+      return route.includes('/cliente/nuovo') || route.includes('/admin/ordini/nuovo')
     }
 
     const refreshWhenVisible = () => {
