@@ -1,0 +1,1528 @@
+diff --git a/scripts/test-backend.mjs b/scripts/test-backend.mjs
+index 9f0a24f..a85490c 100644
+--- a/scripts/test-backend.mjs
++++ b/scripts/test-backend.mjs
+@@ -713,6 +713,113 @@ if (fulfillmentAudit.rows[0].audit_count !== 2) {
+   throw new Error(`Fulfillment audit is incomplete: ${JSON.stringify(fulfillmentAudit.rows[0])}`)
+ }
+ 
++const discountId = 'discount-backend-test'
++await db.query(
++  `insert into public.discount_codes (
++     id, code, description, active, product_price_overrides,
++     product_percent_discounts, free_delivery
++   ) values ($1, 'TEST20', 'Sconto backend test', true, $2::jsonb, $3::jsonb, true)`,
++  [
++    discountId,
++    JSON.stringify({ [productIds['TEST-PER-UNIT']]: 1.5 }),
++    JSON.stringify({ [productIds['TEST-PER-KG']]: 20 }),
++  ],
++)
++const resolvedDiscount = await db.query(
++  `select * from public.resolve_discount_code(
++     'test20', '30000000-0000-4000-8000-000000000001'::uuid
++   )`,
++)
++if (resolvedDiscount.rows[0]?.code !== 'TEST20' || resolvedDiscount.rows[0]?.free_delivery !== true) {
++  throw new Error(`Discount resolution failed: ${JSON.stringify(resolvedDiscount.rows)}`)
++}
++
++const discountedOrderResult = await db.query(
++  `select * from public.place_order_with_discount(
++     null, current_date + 1, 'Test codice sconto', $1::jsonb,
++     'end_of_month'::public.payment_method, null,
++     '30000000-0000-4000-8000-000000000001'::uuid,
++     '40000000-0000-4000-8000-000000000099'::uuid,
++     'TEST20'
++   )`,
++  [JSON.stringify([
++    { product_id: productIds['TEST-PER-KG'], quantity: 1 },
++    { product_id: productIds['TEST-PER-UNIT'], quantity: 1 },
++  ])],
++)
++let discountedOrder = discountedOrderResult.rows[0]
++const discountedSnapshots = await db.query(
++  `select sku_snapshot, unit_price_net from public.order_items
++   where order_id = $1 order by sku_snapshot`,
++  [discountedOrder.id],
++)
++if (
++  discountedOrder.discount_code !== 'TEST20'
++  || Number(discountedOrder.delivery_fee_net) !== 0
++  || Number(discountedOrder.net_total) !== 10.34
++  || Number(discountedOrder.vat_total) !== 1.21
++  || Number(discountedOrder.gross_total) !== 11.55
++  || Number(discountedSnapshots.rows[0].unit_price_net) !== 5.896
++  || Number(discountedSnapshots.rows[1].unit_price_net) !== 1.5
++) {
++  throw new Error(`Discounted order is incorrect: ${JSON.stringify({ discountedOrder, rows: discountedSnapshots.rows })}`)
++}
++const discountedRetry = (await db.query(
++  `select * from public.place_order_with_discount(
++     null, current_date + 1, 'Test codice sconto', $1::jsonb,
++     'end_of_month'::public.payment_method, null,
++     '30000000-0000-4000-8000-000000000001'::uuid,
++     '40000000-0000-4000-8000-000000000099'::uuid,
++     'TEST20'
++   )`,
++  [JSON.stringify([
++    { product_id: productIds['TEST-PER-KG'], quantity: 1 },
++    { product_id: productIds['TEST-PER-UNIT'], quantity: 1 },
++  ])],
++)).rows[0]
++if (Number(discountedRetry.net_total) !== 10.34 || Number(discountedRetry.gross_total) !== 11.55) {
++  throw new Error(`Idempotent discount retry compounded prices: ${JSON.stringify(discountedRetry)}`)
++}
++
++discountedOrder = (await db.query(
++  `select * from public.admin_transition_order(
++     $1::uuid, 'accepted'::public.order_status, $2::integer, 'Accettazione test modifica pagamento'
++   )`,
++  [discountedOrder.id, discountedOrder.version],
++)).rows[0]
++discountedOrder = (await db.query(
++  `select * from public.admin_update_order_payment_method(
++     $1::uuid, 'on_delivery'::public.payment_method
++   )`,
++  [discountedOrder.id],
++)).rows[0]
++if (discountedOrder.payment_method_snapshot !== 'on_delivery') {
++  throw new Error(`Accepted order payment method was not updated: ${JSON.stringify(discountedOrder)}`)
++}
++const editableDdt = (await db.query(
++  `select * from public.prepare_delivery_document(
++     $1::uuid, $2::integer, 'EDIT', current_date, now(), 'Vendita',
++     '{}'::jsonb, null::jsonb, null::integer, 'DDT editabile test'
++   )`,
++  [discountedOrder.id, discountedOrder.version],
++)).rows[0]
++const editedDdt = (await db.query(
++  `select * from public.admin_update_delivery_document_metadata(
++     $1::uuid, 'DDT-TEST-ANTECEDENTE', current_date - 5,
++     'end_of_month'::public.payment_method
++   )`,
++  [editableDdt.id],
++)).rows[0]
++const editedOrder = (await db.query('select * from public.orders where id = $1', [discountedOrder.id])).rows[0]
++if (
++  editedDdt.display_number !== 'DDT-TEST-ANTECEDENTE'
++  || String(editedDdt.issued_on) !== String((await db.query('select current_date - 5 as expected_date')).rows[0].expected_date)
++  || editedDdt.payment_method_snapshot !== 'end_of_month'
++  || editedOrder.payment_method_snapshot !== 'end_of_month'
++) {
++  throw new Error(`DDT metadata update failed: ${JSON.stringify({ editedDdt, editedOrder })}`)
++}
++
+ console.log(JSON.stringify({
+   migration: 'ok',
+   seedProducts: 3,
+@@ -736,6 +843,12 @@ console.log(JSON.stringify({
+     customerMethodAuditCount: paymentMethodAudit.rows[0].change_count,
+     ddtSnapshot: delivery.payment_method_snapshot,
+   },
++  discountsAndDocuments: {
++    code: discountedOrder.discount_code,
++    net: Number(discountedOrder.net_total),
++    editedDdtNumber: editedDdt.display_number,
++    editedDdtPayment: editedDdt.payment_method_snapshot,
++  },
+   fulfillment: {
+     status: fulfillmentOrder.status,
+     net: Number(fulfillmentOrder.net_total),
+diff --git a/src/components/OrderForm.test.tsx b/src/components/OrderForm.test.tsx
+index cfdaed8..1c37017 100644
+--- a/src/components/OrderForm.test.tsx
++++ b/src/components/OrderForm.test.tsx
+@@ -1,4 +1,4 @@
+-import { render, screen, within } from '@testing-library/react'
++import { render, screen, waitFor, within } from '@testing-library/react'
+ import userEvent from '@testing-library/user-event'
+ import { describe, expect, it, vi } from 'vitest'
+ import { OrderForm } from './OrderForm'
+@@ -164,7 +164,7 @@ describe('OrderForm', () => {
+     await user.click(within(checkout).getByText('Pagamento alla consegna'))
+     await user.click(within(checkout).getByRole('button', { name: 'Conferma e invia' }))
+ 
+-    expect(onSubmit).toHaveBeenCalledTimes(1)
++    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
+     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+       requestedDeliveryDate: '2026-08-01',
+       paymentMethod: 'on_delivery',
+diff --git a/src/components/OrderForm.tsx b/src/components/OrderForm.tsx
+index d04ddb3..c31a6ab 100644
+--- a/src/components/OrderForm.tsx
++++ b/src/components/OrderForm.tsx
+@@ -36,6 +36,7 @@ interface OrderFormProps {
+   defaultPaymentMethod?: PaymentMethod
+   preferredProductIds?: string[]
+   discounts?: DiscountCode[]
++  resolveDiscount?: (code: string) => Promise<DiscountCode | null>
+   deliveryFeeNet?: number
+   deliveryFeeVatRate?: number
+   submitLabel?: string
+@@ -51,6 +52,7 @@ export const OrderForm = ({
+   defaultPaymentMethod = 'end_of_month',
+   preferredProductIds = [],
+   discounts = [],
++  resolveDiscount,
+   deliveryFeeNet = initialOrder?.deliveryFeeNet ?? DEFAULT_DELIVERY_FEE_NET,
+   deliveryFeeVatRate = initialOrder?.deliveryFeeVatRate ?? DEFAULT_DELIVERY_FEE_VAT_RATE,
+   submitLabel,
+@@ -63,6 +65,8 @@ export const OrderForm = ({
+   const [notes, setNotes] = useState(initialOrder?.notes ?? '')
+   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(initialOrder?.paymentMethod ?? defaultPaymentMethod)
+   const [discountCode, setDiscountCode] = useState(initialOrder?.discountCode ?? '')
++  const [resolvedDiscount, setResolvedDiscount] = useState<DiscountCode | null>(null)
++  const [discountValidation, setDiscountValidation] = useState<'idle' | 'checking' | 'valid' | 'invalid'>('idle')
+   const [query, setQuery] = useState('')
+   const [category, setCategory] = useState('Tutti')
+   const [error, setError] = useState('')
+@@ -125,16 +129,20 @@ export const OrderForm = ({
+       left.name.localeCompare(right.name, 'it'),
+     )
+ 
+-  const activeDiscount = discounts.find((discount) =>
++  const normalizedDiscountCode = discountCode.trim().toUpperCase()
++  const localDiscount = discounts.find((discount) =>
+     discount.active &&
+-    discount.code.toUpperCase() === discountCode.trim().toUpperCase() &&
++    discount.code.toUpperCase() === normalizedDiscountCode &&
+     (!discount.validUntil || discount.validUntil >= new Date().toISOString().slice(0, 10)),
+   )
++  const activeDiscount = localDiscount ?? (
++    resolvedDiscount?.code.toUpperCase() === normalizedDiscountCode ? resolvedDiscount : undefined
++  )
+ 
+-  const items = useMemo<OrderItem[]>(() => catalogProducts
++  const buildItems = (discount?: DiscountCode) => catalogProducts
+     .filter((product) => (quantities[product.id] ?? 0) > 0)
+     .map((product) => {
+-      const unitPrice = resolveProductUnitPrice(product, activeDiscount)
++      const unitPrice = resolveProductUnitPrice(product, discount)
+       return {
+         productId: product.id,
+         sku: product.sku,
+@@ -146,7 +154,9 @@ export const OrderForm = ({
+         packageSize: product.packageSize,
+         pricingMode: product.pricingMode ?? 'per_unit',
+       } as PricedOrderItem
+-    }), [activeDiscount, catalogProducts, quantities])
++    })
++
++  const items = useMemo<OrderItem[]>(() => buildItems(activeDiscount), [activeDiscount, catalogProducts, quantities])
+ 
+   const totals = calculateOrderTotals({ items })
+   const effectiveDeliveryFeeNet = resolveDeliveryFeeNet(deliveryFeeNet, activeDiscount)
+@@ -195,8 +205,55 @@ export const OrderForm = ({
+     }
+   }, [checkoutOpen])
+ 
++  const validateDiscount = async (): Promise<DiscountCode | null> => {
++    const code = discountCode.trim().toUpperCase()
++    if (!code) {
++      setResolvedDiscount(null)
++      setDiscountValidation('idle')
++      return null
++    }
++    if (localDiscount) {
++      setResolvedDiscount(localDiscount)
++      setDiscountValidation('valid')
++      return localDiscount
++    }
++    if (!resolveDiscount) {
++      setResolvedDiscount(null)
++      setDiscountValidation('invalid')
++      return null
++    }
++    setDiscountValidation('checking')
++    try {
++      const discount = await resolveDiscount(code)
++      setResolvedDiscount(discount)
++      setDiscountValidation(discount ? 'valid' : 'invalid')
++      return discount
++    } catch (reason) {
++      setResolvedDiscount(null)
++      setDiscountValidation('invalid')
++      setError(reason instanceof Error ? reason.message : 'Verifica del codice sconto non riuscita.')
++      return null
++    }
++  }
++
++  const discountHint = discountValidation === 'checking'
++    ? 'Verifica del codice in corso…'
++    : discountValidation === 'invalid' && normalizedDiscountCode
++      ? 'Codice non valido, scaduto o non attivo.'
++      : activeDiscount
++        ? activeDiscount.description || 'Codice sconto applicato.'
++        : 'Inseriscilo solo se comunicato dal venditore.'
++
+   const submitDraft = async () => {
+-    if (!items.length) {
++    const validatedDiscount = normalizedDiscountCode
++      ? activeDiscount ?? await validateDiscount()
++      : null
++    if (normalizedDiscountCode && !validatedDiscount) {
++      setError('Il codice sconto non è valido o non è più attivo.')
++      return
++    }
++    const submittedItems = validatedDiscount === activeDiscount ? items : buildItems(validatedDiscount ?? undefined)
++    if (!submittedItems.length) {
+       setError('Seleziona almeno un prodotto e indica la quantità.')
+       return
+     }
+@@ -215,7 +272,7 @@ export const OrderForm = ({
+     setSubmitting(true)
+     setError('')
+     try {
+-      await onSubmit({ requestedDeliveryDate: date, notes: notes.trim(), paymentMethod, discountCode: activeDiscount?.code, items, idempotencyKey: idempotencyKey.current })
++      await onSubmit({ requestedDeliveryDate: date, notes: notes.trim(), paymentMethod, discountCode: validatedDiscount?.code, items: submittedItems, idempotencyKey: idempotencyKey.current })
+     } catch (reason) {
+       setError(reason instanceof Error ? reason.message : 'Invio non riuscito. Riprova tra poco.')
+     } finally {
+@@ -302,8 +359,8 @@ export const OrderForm = ({
+                 placeholder="Orario preferito, accesso, altre indicazioni…"
+               />
+             </Field>
+-            <Field label="Codice sconto" htmlFor="discount-code" hint={discountCode && !activeDiscount ? 'Codice non valido o non attivo.' : activeDiscount ? activeDiscount.description : 'Inseriscilo solo se comunicato dal venditore.'}>
+-              <input id="discount-code" value={discountCode} onChange={(event) => setDiscountCode(event.target.value.toUpperCase())} placeholder="Es. SCONTO1" />
++            <Field label="Codice sconto" htmlFor="discount-code" hint={discountHint}>
++              <input id="discount-code" value={discountCode} onChange={(event) => { setDiscountCode(event.target.value.toUpperCase()); setResolvedDiscount(null); setDiscountValidation('idle') }} onBlur={() => void validateDiscount()} placeholder="Es. SCONTO1" />
+             </Field>
+           </div>
+         </Card>
+@@ -489,12 +546,13 @@ export const OrderForm = ({
+             <Field
+               label="Codice sconto (facoltativo)"
+               htmlFor="mobile-discount-code"
+-              hint={discountCode && !activeDiscount ? 'Codice non valido o non attivo.' : activeDiscount ? activeDiscount.description : 'Inseriscilo solo se comunicato da Igea.'}
++              hint={discountHint}
+             >
+               <input
+                 id="mobile-discount-code"
+                 value={discountCode}
+-                onChange={(event) => setDiscountCode(event.target.value.toUpperCase())}
++                onChange={(event) => { setDiscountCode(event.target.value.toUpperCase()); setResolvedDiscount(null); setDiscountValidation('idle') }}
++                onBlur={() => void validateDiscount()}
+                 placeholder="Es. SCONTO1"
+               />
+             </Field>
+diff --git a/src/context/AppContext.tsx b/src/context/AppContext.tsx
+index 75319ef..27859b9 100644
+--- a/src/context/AppContext.tsx
++++ b/src/context/AppContext.tsx
+@@ -23,6 +23,7 @@ import {
+   emptyDatabase,
+   loadSupabaseDatabase,
+   loadCustomerCatalog,
++  mapDiscount,
+   productPayload,
+   supplierPayload,
+ } from '../lib/supabaseData'
+@@ -117,9 +118,11 @@ interface AppContextValue {
+     reason: string
+   }) => Promise<void>
+   setOrderStatus: (orderId: string, status: OrderStatus) => Promise<void>
++  updateOrderPaymentMethod: (orderId: string, paymentMethod: PaymentMethod) => Promise<void>
+   confirmOrderPayment: (orderId: string) => Promise<void>
+   issueDdt: (orderId: string) => Promise<DeliveryDocument>
+   updateDeliveryFee: (documentId: string, feeNet: number) => Promise<void>
++  updateDdtMetadata: (documentId: string, draft: { number: string; issueDate: string; paymentMethod: PaymentMethod }) => Promise<void>
+   saveCustomer: (customer: CustomerDraft, id?: string) => Promise<string>
+   importCustomers: (customers: Array<Omit<CustomerDraft, 'paymentMethod'> & { id: string }>) => Promise<number>
+   deleteCustomer: (id: string) => Promise<void>
+@@ -129,6 +132,7 @@ interface AppContextValue {
+   addProduct: (product: Omit<Product, 'id'>) => Promise<void>
+   importProducts: (products: Omit<Product, 'id'>[]) => Promise<number>
+   deleteProduct: (id: string) => Promise<void>
++  resolveDiscountCode: (code: string, customerId?: string) => Promise<DiscountCode | null>
+   saveDiscount: (discount: DiscountCode) => Promise<void>
+   deleteDiscount: (id: string) => Promise<void>
+   saveSupplier: (supplier: SupplierSettings) => Promise<void>
+@@ -387,9 +391,8 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+       throw new Error('Il trasporto viene aggiunto automaticamente e non può essere inserito come prodotto.')
+     }
+     if (isSupabaseMode) {
+-      if (draft.discountCode) throw new Error('I codici sconto in produzione richiedono le tabelle promo Supabase.')
+       const client = requireConfiguredClient()
+-      const { data, error } = await client.rpc('place_order', {
++      const { data, error } = await client.rpc('place_order_with_discount', {
+         p_order_id: null,
+         p_requested_delivery_date: draft.requestedDeliveryDate,
+         p_notes: draft.notes,
+@@ -398,6 +401,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+         p_expected_version: null,
+         p_customer_id: session?.role === 'admin' ? customerId : null,
+         p_idempotency_key: draft.idempotencyKey ?? null,
++        p_discount_code: draft.discountCode?.trim().toUpperCase() || null,
+       })
+       if (error || !data) throw new Error(error?.message ?? 'Creazione ordine non riuscita.')
+       const nextDb = await reloadDatabase()
+@@ -451,11 +455,10 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+       throw new Error('Il trasporto viene aggiunto automaticamente e non può essere inserito come prodotto.')
+     }
+     if (isSupabaseMode) {
+-      if (draft.discountCode) throw new Error('I codici sconto in produzione richiedono le tabelle promo Supabase.')
+       const existing = db.orders.find((order) => order.id === orderId)
+       if (!existing?.version) throw new Error('Versione ordine non disponibile. Aggiorna la pagina.')
+       const client = requireConfiguredClient()
+-      const { error } = await client.rpc('place_order', {
++      const { error } = await client.rpc('place_order_with_discount', {
+         p_order_id: orderId,
+         p_requested_delivery_date: draft.requestedDeliveryDate,
+         p_notes: draft.notes,
+@@ -464,6 +467,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+         p_expected_version: existing.version,
+         p_customer_id: null,
+         p_idempotency_key: null,
++        p_discount_code: draft.discountCode?.trim().toUpperCase() || null,
+       })
+       if (error) throw new Error(error.message)
+       await reloadDatabase()
+@@ -649,6 +653,55 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+     }))
+   }, [db.orders, reloadDatabase])
+ 
++  const updateOrderPaymentMethod = useCallback(async (orderId: string, paymentMethod: PaymentMethod) => {
++    if (session?.role !== 'admin') throw new Error('Solo l’amministratore può modificare il metodo di pagamento.')
++    const order = db.orders.find((item) => item.id === orderId)
++    if (!order) throw new Error('Ordine non trovato.')
++    if (!['submitted', 'accepted', 'in_delivery', 'delivered'].includes(order.status)) {
++      throw new Error('Il metodo di pagamento non può essere modificato nello stato corrente.')
++    }
++    if (order.paymentConfirmedAt && order.paymentMethod !== paymentMethod) {
++      throw new Error('Il pagamento è già stato confermato e non può essere riclassificato.')
++    }
++    if (order.paymentMethod === paymentMethod) return
++
++    if (isSupabaseMode) {
++      const client = requireConfiguredClient()
++      const { error } = await client.rpc('admin_update_order_payment_method', {
++        p_order_id: orderId,
++        p_payment_method: paymentMethod,
++      })
++      if (error) throw new Error(error.message)
++      await reloadDatabase()
++      return
++    }
++
++    const changedAt = new Date().toISOString()
++    setDb((current) => ({
++      ...current,
++      orders: current.orders.map((item) => item.id === orderId
++        ? {
++            ...item,
++            paymentMethod,
++            customerSnapshot: item.customerSnapshot
++              ? { ...item.customerSnapshot, paymentMethod }
++              : item.customerSnapshot,
++            updatedAt: changedAt,
++            version: (item.version ?? 0) + 1,
++          }
++        : item),
++      documents: current.documents.map((document) => document.orderId === orderId && document.status !== 'void'
++        ? {
++            ...document,
++            paymentMethod,
++            customerSnapshot: document.customerSnapshot
++              ? { ...document.customerSnapshot, paymentMethod }
++              : document.customerSnapshot,
++          }
++        : document),
++    }))
++  }, [db.orders, reloadDatabase, session?.role])
++
+   const confirmOrderPayment = useCallback(async (orderId: string) => {
+     if (session?.role !== 'admin') throw new Error('Solo l’amministratore può confermare un pagamento.')
+     const order = db.orders.find((item) => item.id === orderId)
+@@ -785,6 +838,70 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+     })
+   }, [reloadDatabase])
+ 
++  const updateDdtMetadata = useCallback(async (
++    documentId: string,
++    draft: { number: string; issueDate: string; paymentMethod: PaymentMethod },
++  ) => {
++    if (session?.role !== 'admin') throw new Error('Solo l’amministratore può modificare un DDT.')
++    const normalizedNumber = draft.number.trim()
++    if (!normalizedNumber) throw new Error('Il numero DDT è obbligatorio.')
++    if (!/^\d{4}-\d{2}-\d{2}$/.test(draft.issueDate)) throw new Error('Data documento non valida.')
++    if (draft.issueDate > localIsoDate()) throw new Error('La data del DDT non può essere futura.')
++
++    const selectedDocument = db.documents.find((document) => document.id === documentId)
++    if (!selectedDocument || selectedDocument.status === 'void') throw new Error('DDT non modificabile.')
++    const order = db.orders.find((item) => item.id === selectedDocument.orderId)
++    if (!order) throw new Error('Ordine collegato non trovato.')
++    if (order.paymentConfirmedAt && order.paymentMethod !== draft.paymentMethod) {
++      throw new Error('Il pagamento è già stato confermato e non può essere riclassificato.')
++    }
++
++    if (isSupabaseMode) {
++      const client = requireConfiguredClient()
++      const { error } = await client.rpc('admin_update_delivery_document_metadata', {
++        p_document_id: documentId,
++        p_display_number: normalizedNumber,
++        p_issued_on: draft.issueDate,
++        p_payment_method: draft.paymentMethod,
++      })
++      if (error) throw new Error(error.message)
++      await reloadDatabase()
++      return
++    }
++
++    setDb((current) => {
++      if (current.documents.some((document) => document.id !== documentId && document.number === normalizedNumber)) {
++        throw new Error('Esiste già un DDT con questo numero.')
++      }
++      const changedAt = new Date().toISOString()
++      return {
++        ...current,
++        documents: current.documents.map((document) => document.id === documentId
++          ? {
++              ...document,
++              number: normalizedNumber,
++              issueDate: draft.issueDate,
++              paymentMethod: draft.paymentMethod,
++              customerSnapshot: document.customerSnapshot
++                ? { ...document.customerSnapshot, paymentMethod: draft.paymentMethod }
++                : document.customerSnapshot,
++            }
++          : document),
++        orders: current.orders.map((item) => item.id === selectedDocument.orderId
++          ? {
++              ...item,
++              paymentMethod: draft.paymentMethod,
++              customerSnapshot: item.customerSnapshot
++                ? { ...item.customerSnapshot, paymentMethod: draft.paymentMethod }
++                : item.customerSnapshot,
++              updatedAt: changedAt,
++              version: (item.version ?? 0) + 1,
++            }
++          : item),
++      }
++    })
++  }, [db.documents, db.orders, reloadDatabase, session?.role])
++
+   const saveCustomer = useCallback(async (draft: CustomerDraft, id?: string): Promise<string> => {
+     if (isSupabaseMode) {
+       const client = requireConfiguredClient()
+@@ -1000,20 +1117,71 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+     }))
+   }, [reloadDatabase])
+ 
++  const resolveDiscountCode = useCallback(async (code: string, customerId?: string): Promise<DiscountCode | null> => {
++    const normalizedCode = code.trim().toUpperCase()
++    if (!normalizedCode) return null
++    if (!isSupabaseMode) {
++      return db.discounts.find((discount) =>
++        discount.active &&
++        discount.code.toUpperCase() === normalizedCode &&
++        (!discount.validUntil || discount.validUntil >= localIsoDate()),
++      ) ?? null
++    }
++    const client = requireConfiguredClient()
++    const { data, error } = await client.rpc('resolve_discount_code', {
++      p_code: normalizedCode,
++      p_customer_id: session?.role === 'admin' ? customerId ?? null : null,
++    })
++    if (error) throw new Error(error.message)
++    const row = Array.isArray(data) ? data[0] : data
++    return row ? mapDiscount(row) : null
++  }, [db.discounts, session?.role])
++
+   const saveDiscount = useCallback(async (discount: DiscountCode) => {
+-    if (isSupabaseMode) throw new Error('Gli sconti in produzione richiedono le tabelle promo Supabase.')
++    const normalized: DiscountCode = {
++      ...discount,
++      id: discount.id || uid('discount'),
++      code: discount.code.trim().toUpperCase(),
++      description: discount.description.trim(),
++    }
++    if (!normalized.code) throw new Error('Il codice sconto è obbligatorio.')
++    if (isSupabaseMode) {
++      if (session?.role !== 'admin') throw new Error('Solo l’amministratore può salvare gli sconti.')
++      const client = requireConfiguredClient()
++      const { error } = await client.from('discount_codes').upsert({
++        id: normalized.id,
++        code: normalized.code,
++        description: normalized.description,
++        active: normalized.active,
++        valid_until: normalized.validUntil ?? null,
++        product_price_overrides: normalized.productPriceOverrides ?? {},
++        product_percent_discounts: normalized.productPercentDiscounts ?? {},
++        free_delivery: Boolean(normalized.freeDelivery),
++        delivery_fee_net: normalized.deliveryFeeNet ?? null,
++      }, { onConflict: 'id' })
++      if (error) throw new Error(error.message)
++      await reloadDatabase()
++      return
++    }
+     setDb((current) => ({
+       ...current,
+-      discounts: current.discounts.some((item) => item.id === discount.id)
+-        ? current.discounts.map((item) => item.id === discount.id ? discount : item)
+-        : [{ ...discount, id: discount.id || uid('discount') }, ...current.discounts],
++      discounts: current.discounts.some((item) => item.id === normalized.id)
++        ? current.discounts.map((item) => item.id === normalized.id ? normalized : item)
++        : [normalized, ...current.discounts],
+     }))
+-  }, [])
++  }, [reloadDatabase, session?.role])
+ 
+   const deleteDiscount = useCallback(async (id: string) => {
+-    if (isSupabaseMode) throw new Error('Gli sconti in produzione richiedono le tabelle promo Supabase.')
++    if (isSupabaseMode) {
++      if (session?.role !== 'admin') throw new Error('Solo l’amministratore può eliminare gli sconti.')
++      const client = requireConfiguredClient()
++      const { error } = await client.from('discount_codes').delete().eq('id', id)
++      if (error) throw new Error(error.message)
++      await reloadDatabase()
++      return
++    }
+     setDb((current) => ({ ...current, discounts: current.discounts.filter((discount) => discount.id !== id) }))
+-  }, [])
++  }, [reloadDatabase, session?.role])
+ 
+   const saveSupplier = useCallback(async (supplier: SupplierSettings) => {
+     if (isSupabaseMode) {
+@@ -1044,9 +1212,11 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+     getCustomerCatalog,
+     adjustOrderFulfillment,
+     setOrderStatus,
++    updateOrderPaymentMethod,
+     confirmOrderPayment,
+     issueDdt,
+     updateDeliveryFee,
++    updateDdtMetadata,
+     saveCustomer,
+     importCustomers,
+     deleteCustomer,
+@@ -1056,6 +1226,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+     addProduct,
+     importProducts,
+     deleteProduct,
++    resolveDiscountCode,
+     saveDiscount,
+     deleteDiscount,
+     saveSupplier,
+@@ -1076,9 +1247,11 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+     getCustomerCatalog,
+     adjustOrderFulfillment,
+     setOrderStatus,
++    updateOrderPaymentMethod,
+     confirmOrderPayment,
+     issueDdt,
+     updateDeliveryFee,
++    updateDdtMetadata,
+     saveCustomer,
+     importCustomers,
+     deleteCustomer,
+@@ -1088,6 +1261,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
+     addProduct,
+     importProducts,
+     deleteProduct,
++    resolveDiscountCode,
+     saveDiscount,
+     deleteDiscount,
+     saveSupplier,
+diff --git a/src/lib/pdf.ts b/src/lib/pdf.ts
+index 62347a8..4005217 100644
+--- a/src/lib/pdf.ts
++++ b/src/lib/pdf.ts
+@@ -85,7 +85,7 @@ const drawFooter = (pdf: jsPDF, page: number, pages: number) => {
+   pdf.text(`Pagina ${page} di ${pages}`, 196, pageHeight - 8, { align: 'right' })
+ }
+ 
+-export const downloadDdtPdf = async ({ document, order, customer, supplier, products = [] }: DdtPdfData) => {
++const buildDdtPdf = async ({ document, order, customer, supplier, products = [] }: DdtPdfData) => {
+   const documentSupplier = document.supplierSnapshot ?? supplier
+   const documentCustomer = document.customerSnapshot ?? customer
+   const documentDestination = document.destinationSnapshot ?? documentCustomer.deliveryAddress
+@@ -183,7 +183,7 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
+   const totalWithDeliveryVat = totals.vat + deliveryFeeVat
+   const tableEnd = (pdf as jsPDF & { lastAutoTable: { finalY: number } }).lastAutoTable.finalY
+   let infoY = Math.max(tableEnd + 10, 125)
+-  const requiredHeight = 94
++  const requiredHeight = 101
+   if (infoY + requiredHeight > pageHeight - 12) {
+     pdf.addPage()
+     pdf.setFont('helvetica', 'bold')
+@@ -196,7 +196,7 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
+   const reasonLines = wrappedLines(pdf, `Causale: ${document.transportReason}`, 78)
+   const carrierLines = wrappedLines(pdf, `Trasporto: ${document.carrier}`, 78)
+   pdf.setDrawColor(210, 220, 232)
+-  pdf.roundedRect(14, infoY, 182, 54, 2, 2, 'S')
++  pdf.roundedRect(14, infoY, 182, 61, 2, 2, 'S')
+   pdf.setTextColor(30, 42, 56)
+   pdf.setFont('helvetica', 'bold')
+   pdf.setFontSize(8)
+@@ -208,10 +208,16 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
+   pdf.text(paymentText(paymentMethod), 19, infoY + 49, { maxWidth: 78 })
+   pdf.text(`Colli: ${document.packages}`, 108, infoY + 14)
+   pdf.text(`Ordine: ${order.number}`, 108, infoY + 24, { maxWidth: 82 })
+-  pdf.text(`Totale merce: ${euro.format(totals.net)} + IVA`, 108, infoY + 34, { maxWidth: 82 })
+-  pdf.text(`Trasporto: ${euro.format(deliveryFeeNet)} + IVA ${deliveryFeeVatRate}%`, 108, infoY + 40, { maxWidth: 82 })
+-  pdf.text(`Totale doc.: ${euro.format(totalWithDeliveryNet)} + IVA ${euro.format(totalWithDeliveryVat)}`, 108, infoY + 46, { maxWidth: 82 })
+-  pdf.text(`Inizio trasporto: ${document.transportStartedAt ? formatDateTime(document.transportStartedAt) : formatDate(document.issueDate)}`, 108, infoY + 52, { maxWidth: 82 })
++  pdf.text(`Totale merce: ${euro.format(totals.net)} + IVA`, 108, infoY + 32, { maxWidth: 82 })
++  pdf.text(`Trasporto: ${euro.format(deliveryFeeNet)} + IVA ${deliveryFeeVatRate}%`, 108, infoY + 38, { maxWidth: 82 })
++  pdf.text(`Imponibile documento: ${euro.format(totalWithDeliveryNet)}`, 108, infoY + 44, { maxWidth: 82 })
++  pdf.text(`IVA documento: ${euro.format(totalWithDeliveryVat)}`, 108, infoY + 50, { maxWidth: 82 })
++  pdf.setFont('helvetica', 'bold')
++  pdf.setTextColor(...navy)
++  pdf.text(`TOTALE COMPLESSIVO: ${euro.format(totalWithDeliveryNet + totalWithDeliveryVat)}`, 108, infoY + 57, { maxWidth: 82 })
++  pdf.setFont('helvetica', 'normal')
++  pdf.setTextColor(30, 42, 56)
++  pdf.text(`Inizio trasporto: ${document.transportStartedAt ? formatDateTime(document.transportStartedAt) : formatDate(document.issueDate)}`, 19, infoY + 57, { maxWidth: 78 })
+   if ((document.revision ?? 0) > 0) {
+     pdf.setFont('helvetica', 'bold')
+     pdf.setTextColor(154, 83, 16)
+@@ -220,7 +226,7 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
+     pdf.setTextColor(30, 42, 56)
+   }
+ 
+-  const signatureY = infoY + 66
++  const signatureY = infoY + 73
+   pdf.setDrawColor(160, 173, 189)
+   pdf.line(14, signatureY + 12, 85, signatureY + 12)
+   pdf.line(125, signatureY + 12, 196, signatureY + 12)
+@@ -235,5 +241,26 @@ export const downloadDdtPdf = async ({ document, order, customer, supplier, prod
+   }
+ 
+   const safeNumber = document.number.replace(/[^a-z0-9_-]+/gi, '-')
+-  pdf.save(`${safeNumber || 'DDT'}.pdf`)
++  return { pdf, safeNumber: safeNumber || 'DDT' }
++}
++
++export const downloadDdtPdf = async (data: DdtPdfData) => {
++  const { pdf, safeNumber } = await buildDdtPdf(data)
++  pdf.save(`${safeNumber}.pdf`)
++}
++
++export const previewDdtPdf = async (data: DdtPdfData) => {
++  const previewWindow = window.open('', '_blank')
++  if (!previewWindow) throw new Error('Il browser ha bloccato l’anteprima. Abilita i popup per questo sito.')
++  previewWindow.document.title = 'Preparazione anteprima DDT…'
++  previewWindow.document.body.innerHTML = '<p style="font-family: sans-serif; padding: 24px">Preparazione anteprima DDT…</p>'
++  try {
++    const { pdf } = await buildDdtPdf(data)
++    const url = URL.createObjectURL(pdf.output('blob'))
++    previewWindow.location.href = url
++    window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
++  } catch (reason) {
++    previewWindow.close()
++    throw reason
++  }
+ }
+diff --git a/src/lib/supabaseData.ts b/src/lib/supabaseData.ts
+index 8e5d89e..216a7b1 100644
+--- a/src/lib/supabaseData.ts
++++ b/src/lib/supabaseData.ts
+@@ -4,6 +4,7 @@ import type {
+   Customer,
+   Database,
+   DeliveryDocument,
++  DiscountCode,
+   Order,
+   OrderItem,
+   PaymentMethod,
+@@ -200,6 +201,7 @@ const mapOrder = (value: unknown, items: OrderItem[], ddtId?: string): Order =>
+     paymentMethod: normalizePaymentMethod(
+       row.payment_method_snapshot ?? row.paymentMethod ?? customerSnapshot?.paymentMethod,
+     ),
++    discountCode: optionalText(row.discount_code ?? row.discountCode),
+     deliveryFeeNet: row.delivery_fee_net === null || row.delivery_fee_net === undefined
+       ? undefined
+       : number(row.delivery_fee_net),
+@@ -222,6 +224,23 @@ const mapOrder = (value: unknown, items: OrderItem[], ddtId?: string): Order =>
+   }
+ }
+ 
++export const mapDiscount = (value: unknown): DiscountCode => {
++  const row = asRow(value)
++  return {
++    id: text(row.id),
++    code: text(row.code).trim().toUpperCase(),
++    description: text(row.description),
++    active: row.active === undefined ? true : Boolean(row.active),
++    validUntil: optionalText(row.valid_until ?? row.validUntil),
++    productPriceOverrides: asRow(row.product_price_overrides ?? row.productPriceOverrides) as Record<string, number>,
++    productPercentDiscounts: asRow(row.product_percent_discounts ?? row.productPercentDiscounts) as Record<string, number>,
++    freeDelivery: Boolean(row.free_delivery ?? row.freeDelivery),
++    deliveryFeeNet: row.delivery_fee_net === null || row.delivery_fee_net === undefined
++      ? undefined
++      : number(row.delivery_fee_net),
++  }
++}
++
+ const mapDocument = (value: unknown): DeliveryDocument => {
+   const row = asRow(value)
+   const customerSnapshot = mapCustomerSnapshot(row.customer_snapshot, text(row.customer_id))
+@@ -296,7 +315,7 @@ export const loadSupabaseDatabase = async (
+   session: SessionUser,
+ ): Promise<Database> => {
+   const today = localIsoDate()
+-  const [customerRows, relationRows, orderRows, itemRows, documentRows, supplierResult] = await Promise.all([
++  const [customerRows, relationRows, orderRows, itemRows, documentRows, discountRows, supplierResult] = await Promise.all([
+     loadAllRows(
+       (from, to) => client.from('customers').select('*').order('legal_name').order('id').range(from, to),
+       'Lettura clienti non riuscita',
+@@ -321,6 +340,12 @@ export const loadSupabaseDatabase = async (
+       },
+       'Lettura DDT non riuscita',
+     ),
++    session.role === 'admin'
++      ? loadAllRows(
++          (from, to) => client.from('discount_codes').select('*').order('code').range(from, to),
++          'Lettura codici sconto non riuscita',
++        )
++      : Promise.resolve([]),
+     client.from('supplier_settings').select('*').eq('id', 1).maybeSingle(),
+   ])
+ 
+@@ -395,7 +420,7 @@ export const loadSupabaseDatabase = async (
+     products,
+     orders,
+     documents,
+-    discounts: [],
++    discounts: discountRows.map(mapDiscount),
+     supplier: supplierResult.data ? mapSupplier(supplierResult.data) : emptySupplier(),
+     demoCredentials: [],
+     counters: {
+diff --git a/src/pages/AdminPortal.tsx b/src/pages/AdminPortal.tsx
+index f1b4b49..9832d58 100644
+--- a/src/pages/AdminPortal.tsx
++++ b/src/pages/AdminPortal.tsx
+@@ -68,7 +68,7 @@ import {
+   resolveProductUnitPrice,
+   validPromoPercent,
+ } from '../lib/commerce'
+-import { downloadDdtPdf } from '../lib/pdf'
++import { downloadDdtPdf, previewDdtPdf } from '../lib/pdf'
+ import {
+   isPaymentConfirmationDue,
+   paymentMethodLabel,
+@@ -208,7 +208,7 @@ const AdminStat = ({ icon, label, value, change, tone }: { icon: React.ReactNode
+ )
+ 
+ const AdminNewOrder = () => {
+-  const { db, createOrder, getCustomerCatalog } = useApp()
++  const { db, createOrder, getCustomerCatalog, resolveDiscountCode } = useApp()
+   const navigate = useNavigate()
+   const [customerId, setCustomerId] = useState('')
+   const [catalog, setCatalog] = useState<Product[]>([])
+@@ -274,6 +274,7 @@ const AdminNewOrder = () => {
+           defaultPaymentMethod={customer.paymentMethod ?? 'end_of_month'}
+           preferredProductIds={customer.usualProductIds ?? []}
+           discounts={db.discounts}
++          resolveDiscount={(code) => resolveDiscountCode(code, customer.id)}
+           deliveryFeeNet={customer.deliveryFeeMode === 'free' ? 0 : DEFAULT_DELIVERY_FEE_NET}
+           summaryTitle={`Ordine di ${customer.companyName}`}
+           submitLabel="Registra ordine"
+@@ -294,11 +295,12 @@ const AdminNewOrder = () => {
+ }
+ 
+ const AdminOrders = () => {
+-  const { db, setOrderStatus, issueDdt, confirmOrderPayment, adjustOrderFulfillment } = useApp()
++  const { db, setOrderStatus, issueDdt, updateOrderPaymentMethod, confirmOrderPayment, adjustOrderFulfillment } = useApp()
+   const navigate = useNavigate()
+   const initialOrderId = new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('ordine')
+   const [selectedId, setSelectedId] = useState<string | null>(initialOrderId)
+   const [editingFulfillmentId, setEditingFulfillmentId] = useState<string | null>(null)
++  const [editingPaymentOrderId, setEditingPaymentOrderId] = useState<string | null>(null)
+   const [query, setQuery] = useState('')
+   const [filter, setFilter] = useState('all')
+   const [notice, setNotice] = useState('')
+@@ -454,12 +456,26 @@ const AdminOrders = () => {
+               {selected.status === 'accepted' && !document && <Button disabled={busyOrderId === selected.id} icon={<FilePlus2 size={16} />} onClick={() => void createDdt(selected)}>{busyOrderId === selected.id ? 'Emissione…' : 'Emetti DDT'}</Button>}
+               {selected.status === 'in_delivery' && <Button disabled={busyOrderId === selected.id} variant="success" icon={<PackageCheck size={16} />} onClick={() => void changeStatus(selected, 'delivered')}>Segna consegnato</Button>}
+               {isPaymentConfirmationDue(selected) && <Button disabled={busyOrderId === selected.id} variant="success" icon={<CircleDollarSign size={16} />} onClick={() => void confirmPayment(selected)}>{busyOrderId === selected.id ? 'Conferma…' : 'Conferma pagamento'}</Button>}
++              {['submitted', 'accepted', 'in_delivery', 'delivered'].includes(selected.status) && !selected.paymentConfirmedAt && <Button variant="secondary" icon={<CircleDollarSign size={16} />} onClick={() => { setSelectedId(null); setEditingPaymentOrderId(selected.id) }}>Modifica pagamento</Button>}
+               {['submitted', 'accepted', 'in_delivery', 'delivered'].includes(selected.status) && !selected.paymentConfirmedAt && <Button variant="secondary" icon={<Pencil size={16} />} onClick={() => { setSelectedId(null); setEditingFulfillmentId(selected.id) }}>Modifica quantità</Button>}
+               {document && <Button disabled={downloadingDdtId === document.id} variant="secondary" icon={<Download size={16} />} onClick={() => void downloadDdt(document, selected, customer)}>{downloadingDdtId === document.id ? 'Preparazione…' : 'Scarica DDT'}</Button>}
+             </>}
+           />
+         )
+       })()}
++      {editingPaymentOrderId && (() => {
++        const order = db.orders.find((item) => item.id === editingPaymentOrderId)
++        if (!order) return null
++        return <OrderPaymentModal
++          order={order}
++          onClose={() => setEditingPaymentOrderId(null)}
++          onSave={async (paymentMethod) => {
++            await updateOrderPaymentMethod(order.id, paymentMethod)
++            setEditingPaymentOrderId(null)
++            setNotice(`Metodo di pagamento di ${order.number} aggiornato.`)
++          }}
++        />
++      })()}
+       {editingFulfillmentId && (() => {
+         const order = db.orders.find((item) => item.id === editingFulfillmentId)
+         if (!order) return null
+@@ -484,11 +500,13 @@ const AdminOrders = () => {
+ }
+ 
+ const AdminDocuments = () => {
+-  const { db, issueDdt, updateDeliveryFee } = useApp()
++  const { db, issueDdt, updateDeliveryFee, updateDdtMetadata } = useApp()
+   const [notice, setNotice] = useState('')
+   const [error, setError] = useState('')
+   const [issuing, setIssuing] = useState<string | null>(null)
+   const [downloading, setDownloading] = useState<string | null>(null)
++  const [previewing, setPreviewing] = useState<string | null>(null)
++  const [editingDocument, setEditingDocument] = useState<DeliveryDocument | null>(null)
+   const eligibleOrders = db.orders.filter((order) => order.status === 'accepted' && !order.ddtId)
+   const voidDocuments = db.documents.filter((document) => document.status === 'void').length
+ 
+@@ -519,6 +537,20 @@ const AdminDocuments = () => {
+     }
+   }
+ 
++  const preview = async (document: DeliveryDocument) => {
++    const order = db.orders.find((item) => item.id === document.orderId)!
++    const customer = db.customers.find((item) => item.id === document.customerId)!
++    setPreviewing(document.id)
++    setError('')
++    try {
++      await previewDdtPdf({ document, order, customer, supplier: db.supplier, products: db.products })
++    } catch (reason) {
++      setError(operationError(reason))
++    } finally {
++      setPreviewing(null)
++    }
++  }
++
+   const saveDeliveryFee = async (document: DeliveryDocument, feeNet: number) => {
+     setError('')
+     try {
+@@ -533,7 +565,7 @@ const AdminDocuments = () => {
+   const currentYear = new Date().getFullYear()
+   return (
+     <div className="page-stack">
+-      <PageHeader eyebrow="Documenti" title="Documenti di trasporto" description="Emetti DDT progressivi e scaricali in formato PDF." />
++      <PageHeader eyebrow="Documenti" title="Documenti di trasporto" description="Emetti, controlla, modifica e visualizza i DDT prima di scaricarli." />
+       <DemoNotice>Numerazione corrente demo: <strong>{currentYear}/{String(db.counters.ddtByYear[currentYear] ?? 0).padStart(4, '0')}</strong>. In produzione il progressivo deve essere assegnato in modo atomico dal database.</DemoNotice>
+       {notice && <div className="success-banner" role="status"><CheckCircle2 size={20} /><div><strong>Documenti aggiornati</strong><span>{notice}</span></div><button onClick={() => setNotice('')} aria-label="Chiudi"><X size={17} /></button></div>}
+       {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
+@@ -560,11 +592,16 @@ const AdminDocuments = () => {
+         <div className="table-card__title"><div><h2>Archivio DDT</h2><p>{db.documents.length} documenti generati{voidDocuments ? ` · ${voidDocuments} annullati e sostituiti` : ''}</p></div></div>
+         <div className="table-wrap">
+           <table className="data-table responsive-table">
+-            <thead><tr><th>Documento</th><th>Cliente</th><th>Ordine</th><th>Data emissione</th><th>Colli</th><th>Stato</th><th>Trasporto</th><th><span className="sr-only">Azioni</span></th></tr></thead>
++            <thead><tr><th>Documento</th><th>Cliente</th><th>Ordine</th><th>Data emissione</th><th>Colli</th><th>Totale</th><th>Stato</th><th>Trasporto</th><th><span className="sr-only">Azioni</span></th></tr></thead>
+             <tbody>
+               {db.documents.map((document) => {
+                 const customer = db.customers.find((item) => item.id === document.customerId)
+                 const order = db.orders.find((item) => item.id === document.orderId)
++                const documentTotal = order ? calculateOrderTotals({
++                  items: document.itemsSnapshot ?? order.items,
++                  deliveryFeeNet: document.deliveryFeeNet ?? order.deliveryFeeNet ?? DEFAULT_DELIVERY_FEE_NET,
++                  deliveryFeeVatRate: document.deliveryFeeVatRate ?? order.deliveryFeeVatRate ?? 22,
++                }).gross : 0
+                 return (
+                   <tr key={document.id}>
+                     <td data-label="Documento"><strong className="document-number"><FileText size={17} />{document.number}</strong></td>
+@@ -572,12 +609,17 @@ const AdminDocuments = () => {
+                     <td data-label="Ordine">{order?.number}</td>
+                     <td data-label="Data emissione">{formatDate(document.issueDate)}</td>
+                     <td data-label="Colli">{document.packages}</td>
++                    <td data-label="Totale"><strong>{euro.format(documentTotal)}</strong><small className="cell-subline">IVA inclusa</small></td>
+                     <td data-label="Stato"><span className={document.status === 'void' ? 'active-pill' : 'active-pill active-pill--yes'}><span />{document.status === 'void' ? 'Annullato' : (document.revision ?? 0) > 0 ? `Sostitutivo rev. ${document.revision}` : 'Valido'}</span></td>
+                     <td data-label="Trasporto">
+                       <DeliveryFeeInput document={document} onSave={(feeNet) => saveDeliveryFee(document, feeNet)} />
+                       <small className="cell-subline">+ IVA {document.deliveryFeeVatRate ?? 22}%</small>
+                     </td>
+-                    <td className="table-actions"><Button size="sm" variant="secondary" icon={<Download size={16} />} disabled={document.status === 'void' || downloading === document.id} onClick={() => void download(document)}>{document.status === 'void' ? 'Sostituito' : downloading === document.id ? 'Attendi…' : 'PDF'}</Button></td>
++                    <td className="table-actions document-table-actions">
++                      <Button size="sm" variant="secondary" icon={<Eye size={16} />} disabled={document.status === 'void' || previewing === document.id} onClick={() => void preview(document)}>{previewing === document.id ? 'Apertura…' : 'Vedi'}</Button>
++                      <Button size="sm" variant="secondary" icon={<Edit3 size={16} />} disabled={document.status === 'void'} onClick={() => setEditingDocument(document)}>Modifica</Button>
++                      <Button size="sm" variant="secondary" icon={<Download size={16} />} disabled={document.status === 'void' || downloading === document.id} onClick={() => void download(document)}>{document.status === 'void' ? 'Sostituito' : downloading === document.id ? 'Attendi…' : 'PDF'}</Button>
++                    </td>
+                   </tr>
+                 )
+               })}
+@@ -586,10 +628,88 @@ const AdminDocuments = () => {
+           {!db.documents.length && <EmptyState icon={<FileText size={29} />} title="Archivio vuoto" description="I documenti emessi compariranno qui." />}
+         </div>
+       </Card>
++      {editingDocument && <DdtMetadataModal
++        document={editingDocument}
++        order={db.orders.find((item) => item.id === editingDocument.orderId)}
++        onClose={() => setEditingDocument(null)}
++        onSave={async (draft) => {
++          await updateDdtMetadata(editingDocument.id, draft)
++          setEditingDocument(null)
++          setNotice(`Dati di ${draft.number} aggiornati.`)
++        }}
++      />}
+     </div>
+   )
+ }
+ 
++const OrderPaymentModal = ({ order, onClose, onSave }: {
++  order: Order
++  onClose: () => void
++  onSave: (paymentMethod: Order['paymentMethod']) => Promise<void>
++}) => {
++  const [paymentMethod, setPaymentMethod] = useState(order.paymentMethod)
++  const [saving, setSaving] = useState(false)
++  const [error, setError] = useState('')
++  return <Modal title={`Pagamento ${order.number}`} description="La modifica si applica anche al DDT già emesso." onClose={onClose}>
++    <form className="entity-form" onSubmit={async (event) => {
++      event.preventDefault()
++      setSaving(true)
++      setError('')
++      try {
++        await onSave(paymentMethod)
++      } catch (reason) {
++        setError(operationError(reason))
++      } finally {
++        setSaving(false)
++      }
++    }}>
++      <Field label="Metodo di pagamento">
++        <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as Order['paymentMethod'])}>
++          <option value="end_of_month">Fatturazione a fine mese</option>
++          <option value="on_delivery">Pagamento alla consegna</option>
++        </select>
++      </Field>
++      {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
++      <footer className="entity-form__footer"><Button type="button" variant="ghost" disabled={saving} onClick={onClose}>Annulla</Button><Button type="submit" disabled={saving} icon={<Check size={17} />}>{saving ? 'Salvataggio…' : 'Salva pagamento'}</Button></footer>
++    </form>
++  </Modal>
++}
++
++const DdtMetadataModal = ({ document, order, onClose, onSave }: {
++  document: DeliveryDocument
++  order?: Order
++  onClose: () => void
++  onSave: (draft: { number: string; issueDate: string; paymentMethod: Order['paymentMethod'] }) => Promise<void>
++}) => {
++  const [number, setNumber] = useState(document.number)
++  const [issueDate, setIssueDate] = useState(document.issueDate)
++  const [paymentMethod, setPaymentMethod] = useState(document.paymentMethod ?? order?.paymentMethod ?? 'end_of_month')
++  const [saving, setSaving] = useState(false)
++  const [error, setError] = useState('')
++  return <Modal title={`Modifica ${document.number}`} description="Puoi correggere numero, data e pagamento anche dopo l’emissione." onClose={onClose}>
++    <form className="entity-form" onSubmit={async (event) => {
++      event.preventDefault()
++      setSaving(true)
++      setError('')
++      try {
++        await onSave({ number: number.trim(), issueDate, paymentMethod })
++      } catch (reason) {
++        setError(operationError(reason))
++      } finally {
++        setSaving(false)
++      }
++    }}>
++      <div className="form-grid">
++        <Field label="Numero DDT"><input required maxLength={80} value={number} onChange={(event) => setNumber(event.target.value)} /></Field>
++        <Field label="Data documento" hint="Può essere antecedente alla data odierna."><input required type="date" max={new Date().toISOString().slice(0, 10)} value={issueDate} onChange={(event) => setIssueDate(event.target.value)} /></Field>
++        <Field label="Metodo di pagamento" className="field--span-2"><select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as Order['paymentMethod'])}><option value="end_of_month">Fatturazione a fine mese</option><option value="on_delivery">Pagamento alla consegna</option></select></Field>
++      </div>
++      {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
++      <footer className="entity-form__footer"><Button type="button" variant="ghost" disabled={saving} onClick={onClose}>Annulla</Button><Button type="submit" disabled={saving} icon={<Check size={17} />}>{saving ? 'Salvataggio…' : 'Salva modifiche'}</Button></footer>
++    </form>
++  </Modal>
++}
++
+ const DeliveryFeeInput = ({ document, onSave }: {
+   document: DeliveryDocument
+   onSave: (feeNet: number) => Promise<void>
+@@ -656,12 +776,17 @@ const AdminInvoiceReports = () => {
+         </div>
+         <div className="table-wrap">
+           <table className="data-table responsive-table">
+-            <thead><tr><th>Cliente</th><th>Kg/formati</th><th>Consegne</th><th>Pagato consegna</th><th>Totale imponibile</th><th>Sconto manuale</th></tr></thead>
++            <thead><tr><th>Cliente</th><th>Kg venduti per formato</th><th>Consegne</th><th>Pagato consegna</th><th>Totale imponibile</th><th>Sconto manuale</th></tr></thead>
+             <tbody>
+               {reports.map((report) => (
+                 <tr key={report.customer.id} className={selected?.customer.id === report.customer.id ? 'table-row--selected' : ''} onClick={() => setSelectedCustomerId(report.customer.id)}>
+                   <td data-label="Cliente"><button className="table-primary" onClick={() => setSelectedCustomerId(report.customer.id)}>{report.customer.companyName}<small>{report.customer.vatNumber}</small></button></td>
+-                  <td data-label="Kg/formati">{report.products.reduce((sum, row) => sum + row.kg, 0).toFixed(2)} kg · {report.products.length} formati</td>
++                  <td data-label="Kg venduti per formato">
++                    <div className="report-product-breakdown">
++                      <strong>{report.products.reduce((sum, row) => sum + row.kg, 0).toFixed(2)} kg totali</strong>
++                      {report.products.map((row) => <small key={row.sku ?? row.productName}>{row.productName}: {row.kg.toFixed(2)} kg</small>)}
++                    </div>
++                  </td>
+                   <td data-label="Consegne">{report.deliveryCount}</td>
+                   <td data-label="Pagato consegna">{euro.format(report.paidOnDeliveryNet)}</td>
+                   <td data-label="Totale imponibile"><strong>{euro.format(report.totalNet - (discounts[report.customer.id] ?? 0))}</strong></td>
+@@ -827,6 +952,7 @@ const ProductPromotionModal = ({ product, onClose, onSaved }: {
+ const DiscountModal = ({ discount, products, onClose, onSaved }: { discount: DiscountCode; products: Product[]; onClose: () => void; onSaved: (discount: DiscountCode) => Promise<void> }) => {
+   const [form, setForm] = useState(discount)
+   const [saving, setSaving] = useState(false)
++  const [error, setError] = useState('')
+   const changeProductPrice = (productId: string, value: string) => setForm((current) => {
+     const productPriceOverrides = { ...current.productPriceOverrides }
+     if (value === '') delete productPriceOverrides[productId]
+@@ -841,7 +967,18 @@ const DiscountModal = ({ discount, products, onClose, onSaved }: { discount: Dis
+   })
+   return (
+     <Modal title={discount.code ? `Sconto ${discount.code}` : 'Nuovo sconto'} description="Definisci prezzo prodotto e trasporto per il codice promo." onClose={onClose} size="lg">
+-      <form className="entity-form" onSubmit={async (event) => { event.preventDefault(); setSaving(true); await onSaved({ ...form, code: form.code.trim().toUpperCase() }); setSaving(false) }}>
++      <form className="entity-form" onSubmit={async (event) => {
++        event.preventDefault()
++        setSaving(true)
++        setError('')
++        try {
++          await onSaved({ ...form, code: form.code.trim().toUpperCase() })
++        } catch (reason) {
++          setError(operationError(reason))
++        } finally {
++          setSaving(false)
++        }
++      }}>
+         <div className="form-grid">
+           <Field label="Codice"><input required value={form.code} onChange={(event) => setForm((current) => ({ ...current, code: event.target.value.toUpperCase() }))} /></Field>
+           <Field label="Valido fino"><input type="date" value={form.validUntil ?? ''} onChange={(event) => setForm((current) => ({ ...current, validUntil: event.target.value || undefined }))} /></Field>
+@@ -860,6 +997,7 @@ const DiscountModal = ({ discount, products, onClose, onSaved }: { discount: Dis
+             </div>
+           ))}
+         </div>
++        {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
+         <footer className="entity-form__footer"><Button type="button" variant="ghost" disabled={saving} onClick={onClose}>Annulla</Button><Button type="submit" disabled={saving} icon={<Check size={17} />}>{saving ? 'Salvataggio...' : 'Salva sconto'}</Button></footer>
+       </form>
+     </Modal>
+diff --git a/src/pages/CustomerPortal.tsx b/src/pages/CustomerPortal.tsx
+index 80d0c54..c03d3b6 100644
+--- a/src/pages/CustomerPortal.tsx
++++ b/src/pages/CustomerPortal.tsx
+@@ -151,7 +151,7 @@ const CurrentOrder = ({ order, onOpen }: { order: Order; onOpen: () => void }) =
+ }
+ 
+ const NewOrderPage = ({ customerId }: { customerId: string }) => {
+-  const { db, createOrder, updateOrder } = useApp()
++  const { db, createOrder, updateOrder, resolveDiscountCode } = useApp()
+   const navigate = useNavigate()
+   const [searchParams] = useSearchParams()
+   const editId = searchParams.get('modifica')
+@@ -177,6 +177,7 @@ const NewOrderPage = ({ customerId }: { customerId: string }) => {
+         defaultPaymentMethod="end_of_month"
+         preferredProductIds={customer.usualProductIds ?? []}
+         discounts={db.discounts}
++        resolveDiscount={(code) => resolveDiscountCode(code, customerId)}
+         deliveryFeeNet={customer.deliveryFeeMode === 'free' ? 0 : DEFAULT_DELIVERY_FEE_NET}
+         onSubmit={async (draft) => {
+           if (initialOrder) {
+diff --git a/src/styles.css b/src/styles.css
+index d21f6f5..3fb5fe7 100644
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -890,3 +890,15 @@ input:focus, textarea:focus, select:focus { border-color: var(--blue-600); box-s
+   .mobile-order-bar { padding-left: 11px; padding-right: 11px; }
+   .mobile-order-bar button { padding-inline: 12px; }
+ }
++
++
++/* DDT e report fatture */
++.document-table-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
++.report-product-breakdown { display: flex; flex-direction: column; gap: 3px; min-width: 190px; }
++.report-product-breakdown > strong { color: var(--blue-900); }
++.report-product-breakdown > small { color: var(--muted); line-height: 1.35; }
++@media (max-width: 760px) {
++  .document-table-actions { justify-content: stretch; }
++  .document-table-actions .button { flex: 1 1 90px; }
++  .report-product-breakdown { min-width: 0; }
++}
+diff --git a/supabase/migrations/20260721170000_ddt_metadata_payments_and_discounts.sql b/supabase/migrations/20260721170000_ddt_metadata_payments_and_discounts.sql
+new file mode 100644
+index 0000000..da69068
+--- /dev/null
++++ b/supabase/migrations/20260721170000_ddt_metadata_payments_and_discounts.sql
+@@ -0,0 +1,393 @@
++begin;
++
++alter table public.orders
++  add column if not exists discount_code text;
++
++create table if not exists public.discount_codes (
++  id text primary key default gen_random_uuid()::text,
++  code text not null unique,
++  description text not null default '',
++  active boolean not null default true,
++  valid_until date,
++  product_price_overrides jsonb not null default '{}'::jsonb check (jsonb_typeof(product_price_overrides) = 'object'),
++  product_percent_discounts jsonb not null default '{}'::jsonb check (jsonb_typeof(product_percent_discounts) = 'object'),
++  free_delivery boolean not null default false,
++  delivery_fee_net numeric(12,2) check (delivery_fee_net is null or delivery_fee_net >= 0),
++  created_by uuid references auth.users(id) on delete set null default auth.uid(),
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now(),
++  check (code = upper(btrim(code)) and char_length(code) between 2 and 40)
++);
++
++create or replace function private.validate_discount_code_rules()
++returns trigger
++language plpgsql
++set search_path = ''
++as $$
++declare
++  v_value text;
++begin
++  for v_value in select value from jsonb_each_text(new.product_price_overrides)
++  loop
++    if v_value !~ '^[0-9]+([.][0-9]+)?$' or v_value::numeric < 0 then
++      raise exception using errcode = '22023', message = 'Invalid fixed product price in discount code';
++    end if;
++  end loop;
++  for v_value in select value from jsonb_each_text(new.product_percent_discounts)
++  loop
++    if v_value !~ '^[0-9]+([.][0-9]+)?$' or v_value::numeric < 0 or v_value::numeric > 100 then
++      raise exception using errcode = '22023', message = 'Invalid product discount percentage';
++    end if;
++  end loop;
++  new.code := upper(btrim(new.code));
++  return new;
++end;
++$$;
++
++drop trigger if exists discount_codes_validate_rules on public.discount_codes;
++create trigger discount_codes_validate_rules
++before insert or update on public.discount_codes
++for each row execute function private.validate_discount_code_rules();
++
++drop trigger if exists discount_codes_set_updated_at on public.discount_codes;
++create trigger discount_codes_set_updated_at
++before update on public.discount_codes
++for each row execute function private.set_updated_at();
++
++alter table public.discount_codes enable row level security;
++
++drop policy if exists discount_codes_admin_all on public.discount_codes;
++create policy discount_codes_admin_all
++on public.discount_codes
++for all to authenticated
++using (private.is_admin())
++with check (private.is_admin());
++
++grant select, insert, update, delete on public.discount_codes to authenticated;
++
++create or replace function public.resolve_discount_code(
++  p_code text,
++  p_customer_id uuid default null
++)
++returns table (
++  id text,
++  code text,
++  description text,
++  active boolean,
++  valid_until date,
++  product_price_overrides jsonb,
++  product_percent_discounts jsonb,
++  free_delivery boolean,
++  delivery_fee_net numeric
++)
++language plpgsql
++security definer
++set search_path = ''
++as $$
++declare
++  v_customer_id uuid;
++begin
++  if auth.uid() is null then
++    raise exception using errcode = '42501', message = 'Authentication required';
++  end if;
++  if private.is_admin() then
++    v_customer_id := coalesce(p_customer_id, private.current_customer_id());
++  else
++    v_customer_id := private.current_customer_id();
++    if p_customer_id is not null and p_customer_id <> v_customer_id then
++      raise exception using errcode = '42501', message = 'Customer access denied';
++    end if;
++  end if;
++  if v_customer_id is null or not private.can_access_customer(v_customer_id) then
++    raise exception using errcode = '42501', message = 'Customer access denied';
++  end if;
++
++  return query
++  select d.id, d.code, d.description, d.active, d.valid_until,
++         d.product_price_overrides, d.product_percent_discounts,
++         d.free_delivery, d.delivery_fee_net
++  from public.discount_codes d
++  where d.code = upper(btrim(p_code))
++    and d.active
++    and (d.valid_until is null or d.valid_until >= (now() at time zone 'Europe/Rome')::date)
++  limit 1;
++end;
++$$;
++
++create or replace function private.apply_order_discount(
++  p_order_id uuid,
++  p_discount_code text
++)
++returns void
++language plpgsql
++security definer
++set search_path = ''
++as $$
++declare
++  v_order public.orders;
++  v_discount public.discount_codes;
++  v_base_delivery_fee numeric(12,2);
++begin
++  select o.* into v_order
++  from public.orders o
++  where o.id = p_order_id
++  for update;
++
++  if not found then
++    raise exception using errcode = 'P0002', message = 'Order not found';
++  end if;
++  if not private.can_access_customer(v_order.customer_id) then
++    raise exception using errcode = '42501', message = 'Order access denied';
++  end if;
++
++  select case when c.delivery_fee_mode = 'free' then 0 else 3.50 end
++  into v_base_delivery_fee
++  from public.customers c
++  where c.id = v_order.customer_id;
++
++  if nullif(upper(btrim(coalesce(p_discount_code, ''))), '') is not null then
++    select d.* into v_discount
++    from public.discount_codes d
++    where d.code = upper(btrim(p_discount_code))
++      and d.active
++      and (d.valid_until is null or d.valid_until >= (now() at time zone 'Europe/Rome')::date)
++    for share;
++
++    if not found then
++      raise exception using errcode = '22023', message = 'Codice sconto non valido, scaduto o non attivo';
++    end if;
++  end if;
++
++  with priced as (
++    select
++      oi.id,
++      case
++        when v_discount.id is not null and v_discount.product_price_overrides ? oi.product_id::text
++          then round((v_discount.product_price_overrides ->> oi.product_id::text)::numeric, 4)
++        when v_discount.id is not null and v_discount.product_percent_discounts ? oi.product_id::text
++          then round(ep.unit_price_net * (1 - (v_discount.product_percent_discounts ->> oi.product_id::text)::numeric / 100), 4)
++        else ep.unit_price_net
++      end as new_unit_price
++    from public.order_items oi
++    join lateral private.effective_price(
++      v_order.customer_id,
++      oi.product_id,
++      (now() at time zone 'Europe/Rome')::date
++    ) ep on true
++    where oi.order_id = p_order_id
++  )
++  update public.order_items oi
++  set unit_price_net = p.new_unit_price,
++      line_net = round(oi.quantity * case when oi.pricing_mode_snapshot = 'per_kg' then oi.package_size_snapshot else 1 end * p.new_unit_price, 2),
++      line_vat = round(round(oi.quantity * case when oi.pricing_mode_snapshot = 'per_kg' then oi.package_size_snapshot else 1 end * p.new_unit_price, 2) * oi.vat_rate / 100, 2),
++      line_gross = round(oi.quantity * case when oi.pricing_mode_snapshot = 'per_kg' then oi.package_size_snapshot else 1 end * p.new_unit_price, 2)
++        + round(round(oi.quantity * case when oi.pricing_mode_snapshot = 'per_kg' then oi.package_size_snapshot else 1 end * p.new_unit_price, 2) * oi.vat_rate / 100, 2)
++  from priced p
++  where oi.id = p.id;
++
++  update public.orders
++  set discount_code = v_discount.code,
++      delivery_fee_net = case
++        when v_discount.id is null then coalesce(v_base_delivery_fee, 3.50)
++        when v_discount.free_delivery then 0
++        when v_discount.delivery_fee_net is not null then v_discount.delivery_fee_net
++        else coalesce(v_base_delivery_fee, 3.50)
++      end,
++      delivery_fee_vat_rate = 22
++  where id = p_order_id;
++
++  perform private.recalculate_order_totals(p_order_id);
++end;
++$$;
++
++create or replace function public.place_order_with_discount(
++  p_order_id uuid default null,
++  p_requested_delivery_date date default null,
++  p_notes text default null,
++  p_items jsonb default '[]'::jsonb,
++  p_payment_method public.payment_method default 'end_of_month',
++  p_expected_version integer default null,
++  p_customer_id uuid default null,
++  p_idempotency_key uuid default null,
++  p_discount_code text default null
++)
++returns public.orders
++language plpgsql
++security definer
++set search_path = ''
++as $$
++declare
++  v_order public.orders;
++begin
++  v_order := public.place_order(
++    p_order_id,
++    p_requested_delivery_date,
++    p_notes,
++    p_items,
++    p_payment_method,
++    p_expected_version,
++    p_customer_id,
++    p_idempotency_key
++  );
++  perform private.apply_order_discount(v_order.id, p_discount_code);
++  select * into v_order from public.orders where id = v_order.id;
++  return v_order;
++end;
++$$;
++
++create or replace function private.protect_order_payment_evidence()
++returns trigger
++language plpgsql
++set search_path = ''
++as $$
++begin
++  if old.payment_method_snapshot is not null
++     and new.payment_method_snapshot is distinct from old.payment_method_snapshot
++     and coalesce(current_setting('app.allow_payment_method_update', true), '') <> 'on'
++     and (
++       old.status not in ('draft', 'submitted')
++       or new.status not in ('draft', 'submitted')
++       or old.payment_confirmed_at is not null
++     ) then
++    raise exception using errcode = 'P0001', message = 'Order payment method snapshot is immutable';
++  end if;
++
++  if old.payment_confirmed_at is not null
++     and (
++       new.payment_confirmed_at is distinct from old.payment_confirmed_at
++       or new.payment_confirmed_by is distinct from old.payment_confirmed_by
++     ) then
++    raise exception using errcode = 'P0001', message = 'Order payment confirmation is immutable';
++  end if;
++
++  return new;
++end;
++$$;
++
++create or replace function public.admin_update_order_payment_method(
++  p_order_id uuid,
++  p_payment_method public.payment_method
++)
++returns public.orders
++language plpgsql
++security definer
++set search_path = ''
++as $$
++declare
++  v_order public.orders;
++begin
++  if not private.is_admin() then
++    raise exception using errcode = '42501', message = 'Administrator access required';
++  end if;
++  select * into v_order from public.orders where id = p_order_id for update;
++  if not found then
++    raise exception using errcode = 'P0002', message = 'Order not found';
++  end if;
++  if v_order.status not in ('submitted', 'accepted', 'in_delivery', 'delivered') then
++    raise exception using errcode = '22023', message = 'Payment method cannot be changed in the current status';
++  end if;
++  if v_order.payment_confirmed_at is not null and v_order.payment_method_snapshot <> p_payment_method then
++    raise exception using errcode = '22023', message = 'A confirmed payment cannot be reclassified';
++  end if;
++
++  perform set_config('app.allow_payment_method_update', 'on', true);
++
++  update public.orders
++  set payment_method_snapshot = p_payment_method,
++      customer_snapshot = jsonb_set(coalesce(customer_snapshot, '{}'::jsonb), '{paymentMethod}', to_jsonb(p_payment_method), true),
++      version = version + 1
++  where id = p_order_id
++  returning * into v_order;
++
++  update public.delivery_documents
++  set payment_method_snapshot = p_payment_method,
++      customer_snapshot = jsonb_set(customer_snapshot, '{paymentMethod}', to_jsonb(p_payment_method), true),
++      pdf_object_path = null,
++      pdf_sha256 = null
++  where order_id = p_order_id and status <> 'void';
++
++  insert into public.admin_audit_log(actor_user_id, action, details)
++  values (auth.uid(), 'order.payment_method_updated', jsonb_build_object('order_id', p_order_id, 'payment_method', p_payment_method));
++  return v_order;
++end;
++$$;
++
++create or replace function public.admin_update_delivery_document_metadata(
++  p_document_id uuid,
++  p_display_number text,
++  p_issued_on date,
++  p_payment_method public.payment_method
++)
++returns public.delivery_documents
++language plpgsql
++security definer
++set search_path = ''
++as $$
++declare
++  v_document public.delivery_documents;
++  v_order public.orders;
++  v_number text := btrim(p_display_number);
++begin
++  if not private.is_admin() then
++    raise exception using errcode = '42501', message = 'Administrator access required';
++  end if;
++  if nullif(v_number, '') is null or char_length(v_number) > 80 then
++    raise exception using errcode = '22023', message = 'Invalid delivery document number';
++  end if;
++  if p_issued_on is null or p_issued_on < date '2000-01-01' or p_issued_on > (now() at time zone 'Europe/Rome')::date then
++    raise exception using errcode = '22023', message = 'Invalid delivery document date';
++  end if;
++
++  select * into v_document from public.delivery_documents where id = p_document_id for update;
++  if not found then
++    raise exception using errcode = 'P0002', message = 'Delivery document not found';
++  end if;
++  if v_document.status = 'void' then
++    raise exception using errcode = '22023', message = 'A void delivery document cannot be changed';
++  end if;
++
++  select * into v_order from public.orders where id = v_document.order_id for update;
++  if v_order.payment_confirmed_at is not null and v_order.payment_method_snapshot <> p_payment_method then
++    raise exception using errcode = '22023', message = 'A confirmed payment cannot be reclassified';
++  end if;
++
++  perform set_config('app.allow_payment_method_update', 'on', true);
++
++  update public.orders
++  set payment_method_snapshot = p_payment_method,
++      customer_snapshot = jsonb_set(coalesce(customer_snapshot, '{}'::jsonb), '{paymentMethod}', to_jsonb(p_payment_method), true),
++      version = version + 1
++  where id = v_document.order_id;
++
++  update public.delivery_documents
++  set display_number = v_number,
++      issued_on = p_issued_on,
++      payment_method_snapshot = p_payment_method,
++      customer_snapshot = jsonb_set(customer_snapshot, '{paymentMethod}', to_jsonb(p_payment_method), true),
++      pdf_object_path = null,
++      pdf_sha256 = null
++  where id = p_document_id
++  returning * into v_document;
++
++  insert into public.admin_audit_log(actor_user_id, action, details)
++  values (
++    auth.uid(),
++    'delivery_document.metadata_updated',
++    jsonb_build_object(
++      'delivery_document_id', p_document_id,
++      'order_id', v_document.order_id,
++      'display_number', v_document.display_number,
++      'issued_on', v_document.issued_on,
++      'payment_method', v_document.payment_method_snapshot
++    )
++  );
++  return v_document;
++end;
++$$;
++
++grant execute on function public.resolve_discount_code(text, uuid) to authenticated;
++grant execute on function public.place_order_with_discount(uuid, date, text, jsonb, public.payment_method, integer, uuid, uuid, text) to authenticated;
++grant execute on function public.admin_update_order_payment_method(uuid, public.payment_method) to authenticated;
++grant execute on function public.admin_update_delivery_document_metadata(uuid, text, date, public.payment_method) to authenticated;
++
++commit;
