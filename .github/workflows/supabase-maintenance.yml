@@ -87,17 +87,17 @@ jobs:
       - name: Verifica configurazione obbligatoria
         shell: bash
         env:
-          PGDATABASE: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           BACKUP_AGE_RECIPIENT: ${{ vars.BACKUP_AGE_RECIPIENT }}
         run: |
           set -Eeuo pipefail
 
-          if [[ -z "${PGDATABASE:-}" ]]; then
+          if [[ -z "${SUPABASE_DB_URL:-}" ]]; then
             echo "::error title=Configurazione mancante::Aggiungere il secret Actions SUPABASE_DB_URL."
             exit 1
           fi
 
-          case "$PGDATABASE" in
+          case "$SUPABASE_DB_URL" in
             postgres://*|postgresql://*) ;;
             *)
               echo "::error title=Configurazione non valida::SUPABASE_DB_URL deve essere una connection string PostgreSQL."
@@ -105,7 +105,7 @@ jobs:
               ;;
           esac
 
-          case "$PGDATABASE" in
+          case "$SUPABASE_DB_URL" in
             postgres://gestionale_backup.*:*@*:5432/*|postgresql://gestionale_backup.*:*@*:5432/*) ;;
             *)
               echo "::error title=Ruolo backup non valido::Usare gestionale_backup tramite Session pooler sulla porta 5432."
@@ -153,12 +153,41 @@ jobs:
       - name: Esporta schema e dati
         shell: bash
         env:
-          # libpq legge la connection string da PGDATABASE. Docker riceve solo
-          # il nome della variabile: il secret non compare negli argomenti.
-          PGDATABASE: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set -Eeuo pipefail
           umask 077
+
+          clear_connection_env() {
+            unset SUPABASE_DB_URL PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSSLMODE
+          }
+          trap clear_connection_env EXIT
+
+          # Il ruolo creato dallo script locale usa una password alfanumerica:
+          # la URL puo quindi essere separata senza decodifiche ambigue. Il
+          # container riceve solo nomi di variabili, mai valori negli argomenti.
+          connection_without_scheme="${SUPABASE_DB_URL#*://}"
+          connection_credentials="${connection_without_scheme%%@*}"
+          connection_endpoint="${connection_without_scheme#*@}"
+          connection_port_path="${connection_endpoint#*:}"
+          connection_database_query="${connection_port_path#*/}"
+
+          export PGUSER="${connection_credentials%%:*}"
+          export PGPASSWORD="${connection_credentials#*:}"
+          export PGHOST="${connection_endpoint%%:*}"
+          export PGPORT="${connection_port_path%%/*}"
+          export PGDATABASE="${connection_database_query%%\?*}"
+          export PGSSLMODE=require
+          unset SUPABASE_DB_URL
+
+          if [[ "$PGUSER" != gestionale_backup.* ]] \
+            || [[ "$PGHOST" != "aws-0-eu-central-1.pooler.supabase.com" ]] \
+            || [[ "$PGPORT" != "5432" ]] \
+            || [[ "$PGDATABASE" != "postgres" ]] \
+            || [[ ! "$PGPASSWORD" =~ ^[A-Za-z0-9]{64}$ ]]; then
+            echo "::error title=Connection string non valida::Formato del ruolo backup inatteso."
+            exit 1
+          fi
 
           dump_or_fail() {
             local label="$1"
@@ -170,7 +199,12 @@ jobs:
             if docker run \
               --rm \
               --network host \
+              --env PGHOST \
+              --env PGPORT \
+              --env PGUSER \
+              --env PGPASSWORD \
               --env PGDATABASE \
+              --env PGSSLMODE \
               "$PG_DUMP_IMAGE" \
               pg_dump \
               --format=plain \

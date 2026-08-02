@@ -21,10 +21,11 @@ le esecuzioni continuino ad arrivare.
 
 Ogni esecuzione usa `pg_dump` PostgreSQL 17 dall'immagine Docker Official
 Image `postgres:17.8-bookworm`, bloccata a un digest immutabile. La connection
-string viene passata a libpq esclusivamente tramite la variabile d'ambiente
-`PGDATABASE`: non compare negli argomenti di `docker` o `pg_dump`. Il container
-usa la rete del runner, come il comando di dump della Supabase CLI, per
-raggiungere correttamente il Session pooler.
+string viene separata in memoria nei parametri libpq standard; il container
+riceve esclusivamente i nomi delle variabili e nessun valore sensibile compare
+negli argomenti di `docker` o `pg_dump`. Le variabili vengono eliminate alla
+fine dello step. Il container usa la rete del runner, come il comando di dump
+della Supabase CLI, per raggiungere correttamente il Session pooler.
 
 Il backup produce:
 
