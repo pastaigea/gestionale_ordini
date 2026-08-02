@@ -159,11 +159,43 @@ jobs:
           set -Eeuo pipefail
           umask 077
 
-          supabase db dump \
+          dump_or_fail() {
+            local label="$1"
+            shift
+            local output
+            local category="errore_non_classificato"
+
+            if output="$(supabase db dump "$@" 2>&1)"; then
+              return 0
+            fi
+
+            if grep -qi 'password authentication failed' <<< "$output"; then
+              category="autenticazione_database_fallita"
+            elif grep -Eqi 'permission denied|insufficient privilege' <<< "$output"; then
+              category="permesso_lettura_insufficiente"
+            elif grep -Eqi 'must be (a )?superuser|superuser required' <<< "$output"; then
+              category="privilegio_superuser_richiesto"
+            elif grep -qi 'read-only transaction' <<< "$output"; then
+              category="operazione_non_compatibile_con_sola_lettura"
+            elif grep -Eqi 'server version mismatch|aborting because of server version mismatch' <<< "$output"; then
+              category="versione_pg_dump_non_compatibile"
+            elif grep -Eqi 'failed to connect|connection refused|connection timed out|network is unreachable' <<< "$output"; then
+              category="connessione_database_fallita"
+            elif grep -Eqi 'does not exist|not found' <<< "$output"; then
+              category="oggetto_database_mancante"
+            fi
+
+            # Non stampare mai l'output grezzo: potrebbe contenere la connection
+            # string. La categoria e sufficiente per correggere il workflow.
+            echo "::error title=Dump ${label} fallito::Categoria: ${category}."
+            return 1
+          }
+
+          dump_or_fail schema \
             --db-url "$SUPABASE_DB_URL" \
             --file "$BACKUP_WORK_DIR/schema.sql"
 
-          supabase db dump \
+          dump_or_fail dati \
             --db-url "$SUPABASE_DB_URL" \
             --file "$BACKUP_WORK_DIR/data.sql" \
             --use-copy \
@@ -171,12 +203,12 @@ jobs:
             --exclude "storage.buckets_vectors" \
             --exclude "storage.vector_indexes"
 
-          supabase db dump \
+          dump_or_fail storico-schema \
             --db-url "$SUPABASE_DB_URL" \
             --file "$BACKUP_WORK_DIR/history_schema.sql" \
             --schema supabase_migrations
 
-          supabase db dump \
+          dump_or_fail storico-dati \
             --db-url "$SUPABASE_DB_URL" \
             --file "$BACKUP_WORK_DIR/history_data.sql" \
             --use-copy \
