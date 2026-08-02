@@ -101,6 +101,14 @@ jobs:
               ;;
           esac
 
+          case "$SUPABASE_DB_URL" in
+            postgres://gestionale_backup.*:*@*:5432/*|postgresql://gestionale_backup.*:*@*:5432/*) ;;
+            *)
+              echo "::error title=Ruolo backup non valido::Usare gestionale_backup tramite Session pooler sulla porta 5432."
+              exit 1
+              ;;
+          esac
+
           if [[ -z "${BACKUP_AGE_RECIPIENT:-}" ]]; then
             echo "::error title=Configurazione mancante::Aggiungere la variabile Actions BACKUP_AGE_RECIPIENT."
             exit 1
@@ -143,18 +151,13 @@ jobs:
           timestamp="$(date -u +'%Y%m%dT%H%M%SZ')"
           echo "artifact_name=supabase-db-${timestamp}-run-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Esporta ruoli, schema e dati
+      - name: Esporta schema e dati
         shell: bash
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set -Eeuo pipefail
           umask 077
-
-          supabase db dump \
-            --db-url "$SUPABASE_DB_URL" \
-            --file "$BACKUP_WORK_DIR/roles.sql" \
-            --role-only
 
           supabase db dump \
             --db-url "$SUPABASE_DB_URL" \
@@ -180,7 +183,7 @@ jobs:
             --data-only \
             --schema supabase_migrations
 
-          for dump_file in roles.sql schema.sql data.sql history_schema.sql history_data.sql; do
+          for dump_file in schema.sql data.sql history_schema.sql history_data.sql; do
             if [[ ! -s "$BACKUP_WORK_DIR/$dump_file" ]]; then
               echo "::error title=Dump incompleto::$dump_file non esiste o e vuoto."
               exit 1
@@ -189,7 +192,7 @@ jobs:
 
           cli_version="$(supabase --version)"
           {
-            echo "format_version=1"
+            echo "format_version=2"
             printf 'created_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             printf 'repository=%s\n' "$GITHUB_REPOSITORY"
             printf 'workflow_run_id=%s\n' "$GITHUB_RUN_ID"
@@ -200,7 +203,7 @@ jobs:
           (
             cd "$BACKUP_WORK_DIR"
             sha256sum \
-              roles.sql schema.sql data.sql \
+              schema.sql data.sql \
               history_schema.sql history_data.sql manifest.txt \
               > SHA256SUMS
           )
@@ -219,7 +222,7 @@ jobs:
             --gzip \
             --file "$BACKUP_ARCHIVE" \
             --directory "$BACKUP_WORK_DIR" \
-            roles.sql schema.sql data.sql \
+            schema.sql data.sql \
             history_schema.sql history_data.sql manifest.txt SHA256SUMS
 
           age \

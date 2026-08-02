@@ -21,7 +21,6 @@ le esecuzioni continuino ad arrivare.
 
 Ogni esecuzione produce, seguendo la procedura ufficiale Supabase:
 
-- `roles.sql` con i ruoli PostgreSQL;
 - `schema.sql` con lo schema;
 - `data.sql` con i dati tramite `COPY`, esclusi
   `storage.buckets_vectors` e `storage.vector_indexes`;
@@ -30,7 +29,7 @@ Ogni esecuzione produce, seguendo la procedura ufficiale Supabase:
   presenti dopo un ripristino;
 - `manifest.txt` e `SHA256SUMS` per identificare e verificare i file.
 
-I sette file vengono compressi e cifrati con
+I sei file vengono compressi e cifrati con
 [age](https://github.com/FiloSottile/age) prima di lasciare il runner. GitHub
 riceve soltanto un file `tar.gz.age`: SQL, archivio non cifrato e directory di
 lavoro restano sotto `RUNNER_TEMP` e vengono eliminati anche in caso di errore.
@@ -72,18 +71,52 @@ age-keygen -y supabase-backup-age-key.txt
 Il secondo comando stampa una chiave pubblica che inizia con `age1`. Conservare
 `supabase-backup-age-key.txt`, che contiene la chiave privata, in almeno due
 copie protette e separate, per esempio un password manager aziendale e un
-supporto offline cifrato. Non copiarla nel repository, nei log, nelle issue o
-nei secret GitHub: il workflow deve poter cifrare, non decifrare.
+supporto offline cifrato. La copia operativa puo restare nella cartella locale
+`todosGestionale`, che e esclusa da Git, ma non deve mai essere aggiunta ai
+file tracciati, ai log, alle issue o ai secret GitHub: il workflow deve poter
+cifrare, non decifrare.
 
 Se la chiave privata viene persa, i backup non possono essere recuperati.
 
-## 3. Configurare GitHub Actions
+## 3. Creare un ruolo database dedicato
+
+Non usare la password del ruolo principale `postgres` per il backup e non
+reimpostarla: una reimpostazione potrebbe interrompere connessioni esistenti.
+Creare invece una password lunga e casuale riservata al ruolo
+`gestionale_backup`, quindi eseguire una sola volta nel SQL Editor di Supabase:
+
+```sql
+create role gestionale_backup
+  login
+  password 'PASSWORD_LUNGA_E_CASUALE'
+  nosuperuser
+  nocreatedb
+  nocreaterole
+  noreplication
+  bypassrls
+  connection limit 2;
+
+grant connect on database postgres to gestionale_backup;
+grant pg_read_all_data to gestionale_backup;
+alter role gestionale_backup set default_transaction_read_only = on;
+```
+
+`pg_read_all_data` permette di leggere tabelle, viste e sequenze senza
+concedere scritture; `BYPASSRLS` consente al dump di includere anche le righe
+protette dalle policy RLS. `default_transaction_read_only` aggiunge una seconda
+protezione contro modifiche accidentali. Il ruolo non deve essere proprietario
+di oggetti e non deve ricevere privilegi di scrittura o amministrativi. La sua
+password puo essere ruotata o il ruolo eliminato senza cambiare le credenziali
+usate dall'applicazione.
+
+## 4. Configurare GitHub Actions
 
 In **Settings > Secrets and variables > Actions** configurare:
 
 1. In **Secrets**, `SUPABASE_DB_URL` con la connection string **Session
-   pooler** copiata da **Supabase Dashboard > Connect**. Deve includere la
-   password database correttamente percent-encoded. Usare la Session pooler
+   pooler** copiata da **Supabase Dashboard > Connect**, sostituendo l'utente
+   con `gestionale_backup.PROJECT_REF` e usando la password dedicata,
+   correttamente percent-encoded. Usare la Session pooler sulla porta `5432`
    perche i runner GitHub non garantiscono la connettivita IPv6 richiesta dalla
    connessione diretta.
 2. In **Variables**, `BACKUP_AGE_RECIPIENT` con la sola chiave pubblica `age1...`
@@ -92,21 +125,27 @@ In **Settings > Secrets and variables > Actions** configurare:
 Esempio puramente descrittivo della prima variabile, senza valori reali:
 
 ```text
-postgresql://postgres.PROJECT_REF:PASSWORD@HOST_POOLER:5432/postgres?sslmode=require
+postgresql://gestionale_backup.PROJECT_REF:PASSWORD_DEDICATA@HOST_POOLER:5432/postgres?sslmode=require
 ```
 
-`SUPABASE_DB_URL` e un secret privilegiato. Non usare nomi `VITE_*`, non
-commetterlo e non sostituirlo con una chiave `service_role`. Il workflow non
-richiede `SUPABASE_ACCESS_TOKEN`.
+`SUPABASE_DB_URL` e un secret sensibile, ma concede soltanto la lettura
+necessaria al dump. Non usare nomi `VITE_*`, non commetterlo, non inserirvi la
+password del ruolo `postgres` e non sostituirlo con una chiave `service_role`.
+Il workflow non richiede `SUPABASE_ACCESS_TOKEN`.
+
+La identity privata `supabase-backup-age-key.txt` resta soltanto nelle copie
+locali protette indicate al punto 2: non va aggiunta al repository e non va
+salvata in GitHub Actions. Su GitHub viene configurata esclusivamente la chiave
+pubblica `BACKUP_AGE_RECIPIENT`.
 
 In **Settings > Actions > General** lasciare la retention massima degli artifact
 ad almeno 90 giorni. Una policy inferiore farebbe fallire l'upload domenicale.
 
-Il workflow opera soltanto sul branch predefinito. Se una configurazione manca
-o non ha il formato atteso, termina prima di contattare il database e non carica
-alcun artifact.
+Il workflow opera soltanto sul branch predefinito. Se una configurazione manca,
+non usa il ruolo `gestionale_backup` o non indica la Session pooler sulla porta
+`5432`, termina prima di contattare il database e non carica alcun artifact.
 
-## 4. Prima esecuzione e monitoraggio
+## 5. Prima esecuzione e monitoraggio
 
 1. Aprire **Actions > Backup e mantenimento Supabase**.
 2. Selezionare **Run workflow** sul branch predefinito.
@@ -123,7 +162,7 @@ heartbeat riuscito e viceversa. Se arriva un avviso di pausa Supabase,
 controllare subito il job heartbeat e l'Activity del progetto; per eliminare il
 rischio residuo occorre passare a un piano che non preveda la pausa.
 
-## 5. Decifrare e verificare un backup
+## 6. Decifrare e verificare un backup
 
 Dopo aver scaricato e aperto lo ZIP dell'artifact, eseguire in un ambiente
 fidato. Su Windows PowerShell:
@@ -156,7 +195,7 @@ sha256sum --check SHA256SUMS
 Tutti i checksum devono risultare validi. Eliminare in modo sicuro le copie SQL
 in chiaro appena terminata la verifica o il ripristino.
 
-## 6. Prova di ripristino
+## 7. Prova di ripristino
 
 Un backup non verificato tramite restore non e sufficiente. Almeno ogni tre
 mesi creare un progetto Supabase di prova vuoto, abilitarvi le estensioni usate
@@ -167,7 +206,6 @@ Ripristinare poi con `psql`:
 psql \
   --single-transaction \
   --variable ON_ERROR_STOP=1 \
-  --file roles.sql \
   --file schema.sql \
   --command "SET session_replication_role = replica" \
   --file data.sql \
