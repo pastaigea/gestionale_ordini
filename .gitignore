@@ -14,6 +14,7 @@ supabase/.temp/
 
 # Listini/anagrafiche reali locali: importare dall'area admin, non pubblicare.
 /private/
+/todosGestionale/
 
 # Test e file locali
 playwright-report/

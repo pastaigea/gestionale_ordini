@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { OrderForm } from './OrderForm'
 import type { Product } from '../types'
+import { minDeliveryDate } from '../lib/format'
 
 const products: Product[] = [{
   id: 'test-product',
@@ -18,7 +19,7 @@ const products: Product[] = [{
 }]
 
 const fillDeliveryDate = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.type(screen.getByLabelText('Data consegna'), '2026-08-01')
+  await user.type(screen.getByLabelText('Data consegna'), minDeliveryDate())
 }
 
 describe('OrderForm', () => {
@@ -160,13 +161,14 @@ describe('OrderForm', () => {
 
     const checkout = screen.getByRole('dialog', { name: 'Conferma il tuo ordine' })
     expect(within(checkout).getByText('1 confezione')).toBeInTheDocument()
-    await user.type(within(checkout).getByLabelText('Data di consegna richiesta'), '2026-08-01')
+    const deliveryDate = minDeliveryDate()
+    await user.type(within(checkout).getByLabelText('Data di consegna richiesta'), deliveryDate)
     await user.click(within(checkout).getByText('Pagamento alla consegna'))
     await user.click(within(checkout).getByRole('button', { name: 'Conferma e invia' }))
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      requestedDeliveryDate: '2026-08-01',
+      requestedDeliveryDate: deliveryDate,
       paymentMethod: 'on_delivery',
       items: [expect.objectContaining({ productId: 'test-product', quantity: 1 })],
     }))

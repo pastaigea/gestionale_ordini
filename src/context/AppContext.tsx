@@ -3,7 +3,7 @@ import type { PropsWithChildren } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { createDemoDatabase, DEMO_ADMIN } from '../data/demo'
 import { calculateOrderTotals, localIsoDate } from '../lib/format'
-import { effectiveOrderItems, effectiveQuantity } from '../lib/fulfillment'
+import { effectiveOrderItems, effectiveQuantity, MAX_FULFILLMENT_QUANTITY } from '../lib/fulfillment'
 import {
   DEFAULT_DELIVERY_FEE_NET,
   DEFAULT_DELIVERY_FEE_VAT_RATE,
@@ -46,6 +46,14 @@ const SESSION_KEY = 'igea_demo_session_v3'
 
 const uid = (prefix: string) =>
   `${prefix}-${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)}`
+
+const nextBisProgressive = (documents: DeliveryDocument[], year: number) =>
+  Math.max(
+    0,
+    ...documents
+      .filter((document) => document.year === year && /^\d+bis\/\d{4}$/i.test(document.number))
+      .map((document) => document.progressive),
+  ) + 1
 
 const sanitizeDemoDatabase = (database: Database): Database => ({
   ...database,
@@ -90,6 +98,27 @@ const readDemoSession = (): SessionUser | null => {
 }
 
 type CustomerDraft = Omit<Customer, 'id' | 'createdAt' | 'authUserId'>
+type CustomerImportRow = Omit<CustomerDraft, 'paymentMethod'> & { id: string }
+
+const hasImportAddress = (address: Customer['billingAddress']) =>
+  [address.street, address.postalCode, address.city, address.province]
+    .some((value) => value.trim().length > 0)
+
+const customerImportPayload = (customer: CustomerImportRow) => ({
+  legal_name: customer.companyName.trim(),
+  vat_number: customer.vatNumber.trim(),
+  ...(customer.contactName.trim() && customer.contactName.trim() !== customer.companyName.trim()
+    ? { contact_name: customer.contactName.trim() }
+    : {}),
+  ...(customer.fiscalCode.trim() ? { tax_code: customer.fiscalCode.trim() } : {}),
+  ...(customer.sdiCode.trim() ? { sdi_code: customer.sdiCode.trim() } : {}),
+  ...(customer.pec.trim() ? { pec: customer.pec.trim() } : {}),
+  ...(customer.email.trim() ? { email: customer.email.trim().toLowerCase() } : {}),
+  ...(customer.phone.trim() ? { phone: customer.phone.trim() } : {}),
+  ...(hasImportAddress(customer.billingAddress) ? { billing_address: customer.billingAddress } : {}),
+  ...(hasImportAddress(customer.deliveryAddress) ? { shipping_address: customer.deliveryAddress } : {}),
+})
+
 type OrderDraft = Pick<Order, 'requestedDeliveryDate' | 'notes'> & {
   items: OrderItem[]
   paymentMethod: PaymentMethod
@@ -121,11 +150,13 @@ interface AppContextValue {
   updateOrderPaymentMethod: (orderId: string, paymentMethod: PaymentMethod) => Promise<void>
   confirmOrderPayment: (orderId: string) => Promise<void>
   issueDdt: (orderId: string) => Promise<DeliveryDocument>
+  deleteDdt: (documentId: string, confirmationNumber: string, reason: string) => Promise<void>
   updateDeliveryFee: (documentId: string, feeNet: number) => Promise<void>
   updateDdtMetadata: (documentId: string, draft: { number: string; issueDate: string; paymentMethod: PaymentMethod }) => Promise<void>
   saveCustomer: (customer: CustomerDraft, id?: string) => Promise<string>
-  importCustomers: (customers: Array<Omit<CustomerDraft, 'paymentMethod'> & { id: string }>) => Promise<number>
+  importCustomers: (customers: CustomerImportRow[]) => Promise<number>
   deleteCustomer: (id: string) => Promise<void>
+  inviteCustomer: (customerId: string) => Promise<void>
   sendCustomerPasswordReset: (customerId: string) => Promise<void>
   setDemoCustomerPassword: (customerId: string, password: string) => void
   saveProduct: (product: Product) => Promise<void>
@@ -542,8 +573,8 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     }
     for (const item of order.items) {
       const quantity = quantities.get(item.productId)!
-      if (!Number.isInteger(quantity) || quantity < 0 || quantity > item.quantity) {
-        throw new Error(`Quantità non valida per ${item.productName}: deve essere compresa tra 0 e ${item.quantity}.`)
+      if (!Number.isInteger(quantity) || quantity < 0 || quantity > MAX_FULFILLMENT_QUANTITY) {
+        throw new Error(`Quantità non valida per ${item.productName}: deve essere un numero intero tra 0 e ${MAX_FULFILLMENT_QUANTITY}.`)
       }
     }
     if (![...quantities.values()].some((quantity) => quantity > 0)) {
@@ -585,11 +616,11 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     let nextCounters = db.counters
     if (currentDocument) {
       const year = new Date().getFullYear()
-      const progressive = (db.counters.ddtByYear[year] ?? 0) + 1
+      const progressive = nextBisProgressive(db.documents, year)
       replacement = {
         ...structuredClone(currentDocument),
         id: uid('ddt'),
-        number: `DDT-${year}-${progressive.toString().padStart(6, '0')}`,
+        number: `${progressive}bis/${year}`,
         progressive,
         year,
         issueDate: localIsoDate(),
@@ -759,13 +790,13 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     const existing = db.documents.find((item) => item.orderId === orderId && item.status !== 'void')
     if (existing) return existing
     const year = new Date().getFullYear()
-    const progressive = (db.counters.ddtByYear[year] ?? 0) + 1
+    const progressive = nextBisProgressive(db.documents, year)
     const customer = db.customers.find((item) => item.id === order.customerId)
     const discount = order.discountCode ? db.discounts.find((item) => item.active && item.code === order.discountCode) : undefined
     if (!customer) throw new Error('Cliente non trovato.')
     const created: DeliveryDocument = {
       id: uid('ddt'),
-      number: `DDT-${year}-${progressive.toString().padStart(6, '0')}`,
+      number: `${progressive}bis/${year}`,
       progressive,
       year,
       orderId,
@@ -788,7 +819,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
       status: 'ready',
     }
     setDb((current) => {
-      if (current.documents.some((item) => item.orderId === orderId)) return current
+      if (current.documents.some((item) => item.orderId === orderId && item.status !== 'void')) return current
       return {
         ...current,
         documents: [created, ...current.documents],
@@ -803,6 +834,56 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     })
     return created
   }, [db, reloadDatabase])
+
+  const deleteDdt = useCallback(async (
+    documentId: string,
+    confirmationNumber: string,
+    reason: string,
+  ) => {
+    if (session?.role !== 'admin') throw new Error('Solo l\'amministratore può eliminare un DDT.')
+    const document = db.documents.find((item) => item.id === documentId)
+    if (!document) throw new Error('DDT non trovato.')
+    if (confirmationNumber.trim() !== document.number) {
+      throw new Error('Il numero di conferma non corrisponde al DDT selezionato.')
+    }
+    if (reason.trim().length < 3) throw new Error('Indica il motivo dell\'eliminazione.')
+    if (document.status === 'void') return
+
+    const order = db.orders.find((item) => item.id === document.orderId)
+    if (!order) throw new Error('Ordine collegato non trovato.')
+    if (order.paymentConfirmedAt) {
+      throw new Error('Il pagamento è già stato confermato: prima serve una procedura separata di rimborso.')
+    }
+
+    if (isSupabaseMode) {
+      const client = requireConfiguredClient()
+      const { error } = await client.rpc('admin_delete_delivery_document', {
+        p_document_id: documentId,
+        p_confirm_display_number: confirmationNumber.trim(),
+        p_reason: reason.trim(),
+      })
+      if (error) throw new Error(error.message)
+      await reloadDatabase()
+      return
+    }
+
+    const changedAt = new Date().toISOString()
+    setDb((current) => ({
+      ...current,
+      documents: current.documents.map((item) => item.id === documentId
+        ? { ...item, status: 'void' as const }
+        : item),
+      orders: current.orders.map((item) => item.id === document.orderId
+        ? {
+            ...item,
+            status: ['in_delivery', 'delivered'].includes(item.status) ? 'accepted' as const : item.status,
+            ddtId: undefined,
+            updatedAt: changedAt,
+            version: (item.version ?? 0) + 1,
+          }
+        : item),
+    }))
+  }, [db.documents, db.orders, reloadDatabase, session?.role])
 
   const updateDeliveryFee = useCallback(async (documentId: string, feeNet: number) => {
     if (feeNet < 0 || !Number.isFinite(feeNet)) throw new Error('Prezzo trasporto non valido.')
@@ -915,6 +996,9 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
       const client = requireConfiguredClient()
       if (id) {
         const current = db.customers.find((customer) => customer.id === id)
+        if (current?.authUserId && !draft.email.trim()) {
+          throw new Error('Un cliente con account collegato deve mantenere un indirizzo email valido.')
+        }
         if (current?.authUserId && current.email.trim().toLowerCase() !== draft.email.trim().toLowerCase()) {
           const { error: emailError } = await client.functions.invoke('admin-users', {
             body: { action: 'update_email', user_id: current.authUserId, email: draft.email },
@@ -932,23 +1016,13 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
         await reloadDatabase()
         return id
       }
-      const redirectTo = `${window.location.origin}${import.meta.env.BASE_URL}#/imposta-password`
-      const { data, error } = await client.functions.invoke('admin-users', {
-        body: {
-          action: 'invite',
-          email: draft.email,
-          display_name: draft.contactName || draft.companyName,
-          customer: customerPayload({ ...draft, priceListId: draft.priceListId ?? BASE_PRICE_LIST_ID }),
-          redirect_to: redirectTo,
-        },
-      })
-      if (error) throw new Error(error.message)
-      const createdCustomerId = String(data.customer_id)
-      const { error: customerError } = await client
+      const { data, error } = await client
         .from('customers')
-        .update(customerPayload({ ...draft, priceListId: draft.priceListId ?? BASE_PRICE_LIST_ID }))
-        .eq('id', createdCustomerId)
-      if (customerError) throw new Error(customerError.message)
+        .insert(customerPayload({ ...draft, priceListId: draft.priceListId ?? BASE_PRICE_LIST_ID }))
+        .select('id')
+        .single()
+      if (error) throw new Error(error.message)
+      const createdCustomerId = String(data.id)
       await reloadDatabase()
       return createdCustomerId
     }
@@ -962,9 +1036,21 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     return targetId
   }, [db.customers, reloadDatabase])
 
-  const importCustomers = useCallback(async (customers: Array<Omit<CustomerDraft, 'paymentMethod'> & { id: string }>) => {
+  const importCustomers = useCallback(async (customers: CustomerImportRow[]) => {
     if (!customers.length) throw new Error('Il file clienti non contiene anagrafiche.')
-    if (isSupabaseMode) throw new Error('Import clienti in produzione: usare una Edge Function/RPC admin per creare anche gli accessi.')
+    if (customers.length > 500) throw new Error('Il file può contenere al massimo 500 clienti.')
+    if (isSupabaseMode) {
+      const client = requireConfiguredClient()
+      // L'import anagrafico non deve sovrascrivere listino, pagamento,
+      // trasporto o stato attivo gia configurati nel gestionale.
+      const payload = customers.map(customerImportPayload)
+      const { data, error } = await client.rpc('admin_upsert_customers', {
+        p_customers: payload,
+      })
+      if (error) throw new Error(error.message)
+      await reloadDatabase()
+      return Array.isArray(data) ? data.length : customers.length
+    }
     setDb((current) => {
       const imported = customers.map((customer) => ({
         ...customer,
@@ -982,7 +1068,7 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
       }
     })
     return customers.length
-  }, [])
+  }, [reloadDatabase])
 
   const deleteCustomer = useCallback(async (id: string) => {
     if (isSupabaseMode) {
@@ -1008,10 +1094,33 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     }))
   }, [db.customers, reloadDatabase])
 
+  const inviteCustomer = useCallback(async (customerId: string) => {
+    if (!isSupabaseMode) throw new Error('Gli inviti account sono disponibili soltanto con Supabase.')
+    const customer = db.customers.find((item) => item.id === customerId)
+    if (!customer) throw new Error('Cliente non trovato.')
+    if (customer.authUserId) throw new Error('Questo cliente ha già un account collegato.')
+    if (!customer.email.trim()) throw new Error('Inserisci un indirizzo email prima di inviare l\'invito.')
+
+    const client = requireConfiguredClient()
+    const { error } = await client.functions.invoke('admin-users', {
+      body: {
+        action: 'invite',
+        email: customer.email.trim().toLowerCase(),
+        display_name: customer.contactName || customer.companyName,
+        existing_customer_id: customer.id,
+        redirect_to: `${window.location.origin}${import.meta.env.BASE_URL}#/imposta-password`,
+      },
+    })
+    if (error) throw new Error(error.message)
+    await reloadDatabase()
+  }, [db.customers, reloadDatabase])
+
   const sendCustomerPasswordReset = useCallback(async (customerId: string) => {
     const customer = db.customers.find((item) => item.id === customerId)
     if (!customer) throw new Error('Cliente non trovato.')
     if (!isSupabaseMode) return
+    if (!customer.authUserId) throw new Error('Il cliente non ha ancora un account collegato.')
+    if (!customer.email.trim()) throw new Error('L\'account non ha un indirizzo email valido.')
     const client = requireConfiguredClient()
     const { error } = await client.functions.invoke('admin-users', {
       body: {
@@ -1234,11 +1343,13 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     updateOrderPaymentMethod,
     confirmOrderPayment,
     issueDdt,
+    deleteDdt,
     updateDeliveryFee,
     updateDdtMetadata,
     saveCustomer,
     importCustomers,
     deleteCustomer,
+    inviteCustomer,
     sendCustomerPasswordReset,
     setDemoCustomerPassword,
     saveProduct,
@@ -1269,11 +1380,13 @@ export const AppProvider = ({ children }: PropsWithChildren) => {
     updateOrderPaymentMethod,
     confirmOrderPayment,
     issueDdt,
+    deleteDdt,
     updateDeliveryFee,
     updateDdtMetadata,
     saveCustomer,
     importCustomers,
     deleteCustomer,
+    inviteCustomer,
     sendCustomerPasswordReset,
     setDemoCustomerPassword,
     saveProduct,
@@ -1298,6 +1411,7 @@ const issueDdtInternal = async (
   const { data, error } = await client.rpc('prepare_delivery_document', {
     p_order_id: orderId,
     p_expected_version: version,
+    p_series: 'BIS',
   })
   if (error || !data) throw new Error(error?.message ?? 'Emissione DDT non riuscita.')
   const nextDb = await reload()

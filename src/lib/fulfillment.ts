@@ -1,5 +1,7 @@
 import type { Order, OrderItem } from '../types'
 
+export const MAX_FULFILLMENT_QUANTITY = 999
+
 export const effectiveQuantity = (
   item: Pick<OrderItem, 'quantity' | 'fulfilledQuantity'>,
 ) => item.fulfilledQuantity ?? item.quantity

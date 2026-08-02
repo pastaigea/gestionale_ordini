@@ -1,7 +1,7 @@
 import { AlertTriangle, Check, PackageCheck } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { effectiveQuantity } from '../lib/fulfillment'
+import { effectiveQuantity, MAX_FULFILLMENT_QUANTITY } from '../lib/fulfillment'
 import { calculateLineNet, calculateOrderTotals, euro } from '../lib/format'
 import { DEFAULT_DELIVERY_FEE_NET, DEFAULT_DELIVERY_FEE_VAT_RATE } from '../lib/commerce'
 import type { DeliveryDocument, Order } from '../types'
@@ -32,11 +32,19 @@ export const AdminFulfillmentEditor = ({ order, document, onSubmit, onClose }: A
   const deliveryFeeNet = document?.deliveryFeeNet ?? order.deliveryFeeNet ?? DEFAULT_DELIVERY_FEE_NET
   const deliveryFeeVatRate = document?.deliveryFeeVatRate ?? order.deliveryFeeVatRate ?? DEFAULT_DELIVERY_FEE_VAT_RATE
   const totals = calculateOrderTotals({ items: effectiveItems, deliveryFeeNet, deliveryFeeVatRate })
-  const isPartial = effectiveItems.some((item) => effectiveQuantity(item) < item.quantity)
+  const hasReduction = effectiveItems.some((item) => effectiveQuantity(item) < item.quantity)
+  const hasIncrease = effectiveItems.some((item) => effectiveQuantity(item) > item.quantity)
+  const adjustmentLabel = hasReduction && hasIncrease
+    ? 'Rettifica mista'
+    : hasIncrease
+      ? 'Quantità aumentate'
+      : hasReduction
+        ? 'Consegna parziale'
+        : 'Ordine completo'
 
-  const changeQuantity = (productId: string, orderedQuantity: number, value: number) => {
+  const changeQuantity = (productId: string, value: number) => {
     const safe = Number.isFinite(value)
-      ? Math.max(0, Math.min(orderedQuantity, Math.floor(value)))
+      ? Math.max(0, Math.min(MAX_FULFILLMENT_QUANTITY, Math.floor(value)))
       : 0
     setQuantities((current) => ({ ...current, [productId]: safe }))
     setError('')
@@ -72,7 +80,7 @@ export const AdminFulfillmentEditor = ({ order, document, onSubmit, onClose }: A
   return (
     <Modal
       title={`Quantità consegnate · ${order.number}`}
-      description="La richiesta originale del cliente resta memorizzata e visibile."
+      description="Puoi diminuire o aumentare le quantità. La richiesta originale del cliente resta memorizzata e visibile."
       onClose={onClose}
       size="lg"
     >
@@ -95,9 +103,18 @@ export const AdminFulfillmentEditor = ({ order, document, onSubmit, onClose }: A
             <tbody>
               {order.items.map((item) => {
                 const fulfilled = quantities[item.productId] ?? item.quantity
+                const isReduced = fulfilled < item.quantity
+                const isIncreased = fulfilled > item.quantity
                 return (
-                  <tr className={fulfilled < item.quantity ? 'fulfillment-table__partial' : ''} key={item.productId}>
-                    <td><strong>{item.productName}</strong>{fulfilled < item.quantity && <small>Consegna parziale</small>}</td>
+                  <tr
+                    className={isIncreased ? 'fulfillment-table__increase' : isReduced ? 'fulfillment-table__partial' : ''}
+                    key={item.productId}
+                  >
+                    <td>
+                      <strong>{item.productName}</strong>
+                      {isReduced && <small>Consegna parziale</small>}
+                      {isIncreased && <small>Aumento rispetto all'ordine</small>}
+                    </td>
                     <td>{item.packageLabel}</td>
                     <td className="align-right"><strong>{item.quantity}</strong></td>
                     <td className="align-right">
@@ -105,10 +122,10 @@ export const AdminFulfillmentEditor = ({ order, document, onSubmit, onClose }: A
                         aria-label={`Quantità da consegnare di ${item.productName}`}
                         type="number"
                         min="0"
-                        max={item.quantity}
+                        max={MAX_FULFILLMENT_QUANTITY}
                         step="1"
                         value={fulfilled}
-                        onChange={(event) => changeQuantity(item.productId, item.quantity, Number(event.target.value))}
+                        onChange={(event) => changeQuantity(item.productId, Number(event.target.value))}
                       />
                     </td>
                     <td className="align-right"><strong>{euro.format(calculateLineNet({ ...item, quantity: fulfilled }))}</strong></td>
@@ -127,7 +144,7 @@ export const AdminFulfillmentEditor = ({ order, document, onSubmit, onClose }: A
         </div>
 
         <div className="fulfillment-editor__summary">
-          <span><PackageCheck size={18} /><strong>{isPartial ? 'Consegna parziale' : 'Ordine completo'}</strong></span>
+          <span><PackageCheck size={18} /><strong>{adjustmentLabel}</strong></span>
           <span>Confezioni: <strong>{totals.packages}</strong></span>
           <span>Imponibile: <strong>{euro.format(totals.net)}</strong></span>
           <span>Totale: <strong>{euro.format(totals.gross)}</strong></span>
@@ -140,7 +157,7 @@ export const AdminFulfillmentEditor = ({ order, document, onSubmit, onClose }: A
             maxLength={300}
             value={reason}
             onChange={(event) => setReason(event.target.value)}
-            placeholder="Es. disponibilità insufficiente del formato richiesto"
+            placeholder="Es. quantità effettivamente consegnate diverse dall'ordine"
             required
           />
         </Field>

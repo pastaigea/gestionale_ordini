@@ -1,0 +1,297 @@
+name: Backup e mantenimento Supabase
+
+on:
+  schedule:
+    # Orario italiano esplicito; il minuto 23 evita il picco di inizio ora.
+    - cron: "23 4 * * *"
+      timezone: Europe/Rome
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-production-backup
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    name: Heartbeat database
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://yhhaplwheykxumdmuajg.supabase.co' }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_IbwVuU30_vuA6BltF08z_A_mCvKD57b' }}
+
+    steps:
+      - name: Registra attività giornaliera
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          case "$SUPABASE_URL" in
+            https://*.supabase.co) ;;
+            *)
+              echo "::error title=URL Supabase non valido::Controllare la variabile VITE_SUPABASE_URL."
+              exit 1
+              ;;
+          esac
+          case "$SUPABASE_PUBLISHABLE_KEY" in
+            sb_publishable_*|eyJ*) ;;
+            *)
+              echo "::error title=Publishable key non valida::Controllare VITE_SUPABASE_PUBLISHABLE_KEY."
+              exit 1
+              ;;
+          esac
+
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --connect-timeout 15 \
+            --max-time 45 \
+            --request POST \
+            --header "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+            --header "Authorization: Bearer $SUPABASE_PUBLISHABLE_KEY" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            --output /dev/null \
+            "${SUPABASE_URL%/}/rest/v1/rpc/keep_project_active"
+
+          echo "### Heartbeat Supabase completato" >> "$GITHUB_STEP_SUMMARY"
+
+  backup:
+    name: Dump database cifrato
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Definisci percorsi temporanei
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "BACKUP_WORK_DIR=$RUNNER_TEMP/gestionale-ordini-supabase-backup"
+            echo "BACKUP_ARCHIVE=$RUNNER_TEMP/gestionale-ordini-supabase-backup.tar.gz"
+            echo "ENCRYPTED_BACKUP=$RUNNER_TEMP/gestionale-ordini-supabase-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz.age"
+          } >> "$GITHUB_ENV"
+
+      - name: Verifica configurazione obbligatoria
+        shell: bash
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_AGE_RECIPIENT: ${{ vars.BACKUP_AGE_RECIPIENT }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ -z "${SUPABASE_DB_URL:-}" ]]; then
+            echo "::error title=Configurazione mancante::Aggiungere il secret Actions SUPABASE_DB_URL."
+            exit 1
+          fi
+
+          case "$SUPABASE_DB_URL" in
+            postgres://*|postgresql://*) ;;
+            *)
+              echo "::error title=Configurazione non valida::SUPABASE_DB_URL deve essere una connection string PostgreSQL."
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "${BACKUP_AGE_RECIPIENT:-}" ]]; then
+            echo "::error title=Configurazione mancante::Aggiungere la variabile Actions BACKUP_AGE_RECIPIENT."
+            exit 1
+          fi
+
+          case "$BACKUP_AGE_RECIPIENT" in
+            age1*) ;;
+            *)
+              echo "::error title=Configurazione non valida::BACKUP_AGE_RECIPIENT deve essere una chiave pubblica age (age1...)."
+              exit 1
+              ;;
+          esac
+
+      - name: Installa Supabase CLI
+        uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+        with:
+          version: 2.109.1
+
+      - name: Installa age
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends age
+          age --version
+
+      - name: Prepara area temporanea
+        id: metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          if [[ -e "$BACKUP_WORK_DIR" || -e "$BACKUP_ARCHIVE" || -e "$ENCRYPTED_BACKUP" ]]; then
+            echo "::error title=Area temporanea non vuota::Il workflow non sovrascrive file preesistenti."
+            exit 1
+          fi
+
+          install -d -m 700 "$BACKUP_WORK_DIR"
+          timestamp="$(date -u +'%Y%m%dT%H%M%SZ')"
+          echo "artifact_name=supabase-db-${timestamp}-run-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Esporta ruoli, schema e dati
+        shell: bash
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          supabase db dump \
+            --db-url "$SUPABASE_DB_URL" \
+            --file "$BACKUP_WORK_DIR/roles.sql" \
+            --role-only
+
+          supabase db dump \
+            --db-url "$SUPABASE_DB_URL" \
+            --file "$BACKUP_WORK_DIR/schema.sql"
+
+          supabase db dump \
+            --db-url "$SUPABASE_DB_URL" \
+            --file "$BACKUP_WORK_DIR/data.sql" \
+            --use-copy \
+            --data-only \
+            --exclude "storage.buckets_vectors" \
+            --exclude "storage.vector_indexes"
+
+          supabase db dump \
+            --db-url "$SUPABASE_DB_URL" \
+            --file "$BACKUP_WORK_DIR/history_schema.sql" \
+            --schema supabase_migrations
+
+          supabase db dump \
+            --db-url "$SUPABASE_DB_URL" \
+            --file "$BACKUP_WORK_DIR/history_data.sql" \
+            --use-copy \
+            --data-only \
+            --schema supabase_migrations
+
+          for dump_file in roles.sql schema.sql data.sql history_schema.sql history_data.sql; do
+            if [[ ! -s "$BACKUP_WORK_DIR/$dump_file" ]]; then
+              echo "::error title=Dump incompleto::$dump_file non esiste o e vuoto."
+              exit 1
+            fi
+          done
+
+          cli_version="$(supabase --version)"
+          {
+            echo "format_version=1"
+            printf 'created_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'workflow_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'workflow_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'supabase_cli_version=%s\n' "$cli_version"
+          } > "$BACKUP_WORK_DIR/manifest.txt"
+
+          (
+            cd "$BACKUP_WORK_DIR"
+            sha256sum \
+              roles.sql schema.sql data.sql \
+              history_schema.sql history_data.sql manifest.txt \
+              > SHA256SUMS
+          )
+
+      - name: Comprimi e cifra il backup
+        id: encrypt
+        shell: bash
+        env:
+          BACKUP_AGE_RECIPIENT: ${{ vars.BACKUP_AGE_RECIPIENT }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          tar \
+            --create \
+            --gzip \
+            --file "$BACKUP_ARCHIVE" \
+            --directory "$BACKUP_WORK_DIR" \
+            roles.sql schema.sql data.sql \
+            history_schema.sql history_data.sql manifest.txt SHA256SUMS
+
+          age \
+            --encrypt \
+            --recipient "$BACKUP_AGE_RECIPIENT" \
+            --output "$ENCRYPTED_BACKUP" \
+            "$BACKUP_ARCHIVE"
+
+          if [[ ! -s "$ENCRYPTED_BACKUP" ]]; then
+            echo "::error title=Cifratura non riuscita::Il file cifrato non esiste o e vuoto."
+            exit 1
+          fi
+
+          chmod 600 "$ENCRYPTED_BACKUP"
+          encrypted_sha256="$(sha256sum "$ENCRYPTED_BACKUP" | cut -d ' ' -f 1)"
+          echo "sha256=$encrypted_sha256" >> "$GITHUB_OUTPUT"
+
+          # Il testo in chiaro non deve sopravvivere fino allo step di upload.
+          rm -f -- "$BACKUP_ARCHIVE"
+          rm -rf -- "$BACKUP_WORK_DIR"
+
+      - name: Calcola conservazione
+        id: retention
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "$(TZ=Europe/Rome date +'%u')" == "7" ]]; then
+            echo "days=90" >> "$GITHUB_OUTPUT"
+            echo "label=settimanale" >> "$GITHUB_OUTPUT"
+          else
+            echo "days=14" >> "$GITHUB_OUTPUT"
+            echo "label=giornaliero" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Carica esclusivamente il backup cifrato
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: ${{ env.ENCRYPTED_BACKUP }}
+          if-no-files-found: error
+          retention-days: ${{ steps.retention.outputs.days }}
+          compression-level: 0
+
+      - name: Registra esito
+        shell: bash
+        run: |
+          {
+            echo "### Backup Supabase completato"
+            echo
+            echo "- Tipo: ${{ steps.retention.outputs.label }}"
+            echo "- Conservazione: ${{ steps.retention.outputs.days }} giorni"
+            echo "- SHA-256 del file age: \`${{ steps.encrypt.outputs.sha256 }}\`"
+            echo "- Artifact: [apri backup cifrato](${{ steps.upload.outputs.artifact-url }})"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Elimina sempre i file temporanei
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          backup_work_dir="${BACKUP_WORK_DIR:-$RUNNER_TEMP/gestionale-ordini-supabase-backup}"
+          backup_archive="${BACKUP_ARCHIVE:-$RUNNER_TEMP/gestionale-ordini-supabase-backup.tar.gz}"
+          encrypted_backup="${ENCRYPTED_BACKUP:-$RUNNER_TEMP/gestionale-ordini-supabase-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz.age}"
+
+          for temporary_path in "$backup_work_dir" "$backup_archive" "$encrypted_backup"; do
+            if [[ "$temporary_path" != "$RUNNER_TEMP/"* ]]; then
+              echo "::error title=Cleanup rifiutato::Percorso esterno a RUNNER_TEMP."
+              exit 1
+            fi
+          done
+
+          rm -rf -- "$backup_work_dir"
+          rm -f -- "$backup_archive" "$encrypted_backup"

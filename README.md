@@ -12,10 +12,13 @@ La versione locale include una modalita demo completa con dati esclusivamente fi
 - promo prodotto con percentuale scelta dall'admin, prezzo scontato calcolato dal server e priorità in cima al catalogo;
 - una sola voce trasporto automatica per ordine, separata dai prodotti, con default 3,50 € + IVA 22%;
 - inserimento ordine sia dal cliente sia dall'amministratore per conto del cliente;
+- anagrafiche cliente utilizzabili anche senza account, con invito esplicito in un secondo momento;
 - rettifica amministrativa delle quantità effettivamente consegnate, senza perdere la richiesta originale;
 - stati “In ordine”, “Accettato”, “Rifiutato”, “In consegna” e “Consegnato”;
 - dashboard amministrativa per ordini, clienti, prodotti e dati Igea;
 - DDT progressivo annuale, snapshot dei dati, sostituzione tracciata in caso di rettifica ed esportazione PDF;
+- nuova serie DDT `1bis/ANNO`, modifica quantità dall'archivio ed eliminazione logica auditata;
+- report operativo degli ordini da evadere raggruppati per giorno;
 - notifica Telegram con pulsanti Accetta/Rifiuta;
 - scelta della modalità di pagamento per ordine e conferma amministrativa del pagamento alla consegna;
 - workflow pronto per `pastaigea/gestionale_ordini` su GitHub Pages.
@@ -63,6 +66,8 @@ Nell'MVP il PDF DDT viene rigenerato nel browser a partire da snapshot protetti.
 - [Architettura e confini di sicurezza](docs/ARCHITETTURA.md)
 - [Configurazione locale e produzione](docs/CONFIGURAZIONE.md)
 - [Importazione privata del catalogo](docs/IMPORTAZIONE_CATALOGO.md)
+- [Importazione clienti senza account](docs/IMPORTAZIONE_CLIENTI.md)
+- [Backup e mantenimento Supabase Free](docs/SUPABASE_BACKUP.md)
 - [Telegram](docs/TELEGRAM.md)
 - [Integrazione Fatture in Cloud](docs/FATTURE_IN_CLOUD.md)
 - [Dati da confermare](docs/DATI_DA_CONFERMARE.md)

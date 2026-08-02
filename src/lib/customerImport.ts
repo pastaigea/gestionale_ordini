@@ -19,27 +19,30 @@ export const parseCustomersTsv = (text: string): Omit<Customer, 'createdAt' | 'a
     const rawId = get('ID Cliente') || `AUTO${String(index + 1).padStart(3, '0')}`
     const companyName = get('Ragione Sociale')
     if (!companyName) throw new Error(`Riga ${index + 2}: ragione sociale mancante.`)
-    const email = get('Email') || `${slug(companyName || rawId)}@cliente.local`
+    const email = get('Email').toLowerCase()
     const address = {
       street: get('Indirizzo'),
       postalCode: get('CAP'),
       city: get('Comune'),
       province: get('Provincia').toUpperCase(),
-      country: 'Italia',
+      country: get('Paese') || 'Italia',
     }
+    const deliveryAddress = get('Indirizzo Consegna')
+      ? { ...address, street: get('Indirizzo Consegna') }
+      : address
     return {
       id: `customer-${rawId.toLowerCase()}`,
       companyName,
       contactName: get('Alias').split('|')[0] || companyName,
       email,
       username: slug(get('Alias').split('|')[0] || companyName || rawId),
-      phone: '',
+      phone: get('Telefono'),
       vatNumber: get('P.IVA'),
       fiscalCode: get('Codice Fiscale'),
       pec: get('PEC'),
       sdiCode: get('SDI'),
       billingAddress: address,
-      deliveryAddress: address,
+      deliveryAddress,
       deliveryFeeMode: get('Trasporto Default').toUpperCase() === 'NO' ? 'free' : 'standard',
       active: get('Attivo').toUpperCase() !== 'NO',
       priceListId: undefined,

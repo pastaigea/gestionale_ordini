@@ -3,6 +3,7 @@ import {
   ArrowRight,
   Ban,
   Building2,
+  CalendarDays,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -40,6 +41,7 @@ import type { ChangeEvent, FormEvent } from 'react'
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AdminFulfillmentEditor } from '../components/AdminFulfillmentEditor'
+import { AdminOutstandingOrdersReport } from '../components/AdminOutstandingOrdersReport'
 import { OrderDetails } from '../components/OrderDetails'
 import { OrderForm } from '../components/OrderForm'
 import { StatusBadge } from '../components/StatusBadge'
@@ -53,6 +55,7 @@ import {
   formatDate,
   formatDateTime,
   isPricedPerKg,
+  localIsoDate,
   statusMeta,
 } from '../lib/format'
 import type { PricingMode } from '../lib/format'
@@ -81,6 +84,7 @@ import type { Customer, DeliveryDocument, DiscountCode, Order, OrderStatus, Prod
 const adminNav = [
   { to: '/admin', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/admin/ordini', label: 'Gestione ordini', icon: ClipboardList },
+  { to: '/admin/report-evasione', label: 'Ordini da evadere', icon: CalendarDays },
   { to: '/admin/ddt', label: 'Documenti DDT', icon: FileText },
   { to: '/admin/report-fatture', label: 'Report fatture', icon: FileSpreadsheet },
   { to: '/admin/sconti', label: 'Sconti e promo', icon: Percent },
@@ -108,6 +112,7 @@ export const AdminPortal = () => (
       <Route index element={<AdminDashboard />} />
       <Route path="ordini" element={<AdminOrders />} />
       <Route path="ordini/nuovo" element={<AdminNewOrder />} />
+      <Route path="report-evasione" element={<AdminOutstandingOrdersReport />} />
       <Route path="ddt" element={<AdminDocuments />} />
       <Route path="report-fatture" element={<AdminInvoiceReports />} />
       <Route path="sconti" element={<AdminDiscounts />} />
@@ -500,15 +505,28 @@ const AdminOrders = () => {
 }
 
 const AdminDocuments = () => {
-  const { db, issueDdt, updateDeliveryFee, updateDdtMetadata } = useApp()
+  const {
+    db,
+    issueDdt,
+    adjustOrderFulfillment,
+    deleteDdt,
+    updateDeliveryFee,
+    updateDdtMetadata,
+  } = useApp()
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [issuing, setIssuing] = useState<string | null>(null)
   const [downloading, setDownloading] = useState<string | null>(null)
   const [previewing, setPreviewing] = useState<string | null>(null)
   const [editingDocument, setEditingDocument] = useState<DeliveryDocument | null>(null)
+  const [editingQuantitiesDocument, setEditingQuantitiesDocument] = useState<DeliveryDocument | null>(null)
+  const [deletingDocument, setDeletingDocument] = useState<DeliveryDocument | null>(null)
+  const [showVoid, setShowVoid] = useState(false)
   const eligibleOrders = db.orders.filter((order) => order.status === 'accepted' && !order.ddtId)
   const voidDocuments = db.documents.filter((document) => document.status === 'void').length
+  const visibleDocuments = showVoid
+    ? db.documents
+    : db.documents.filter((document) => document.status !== 'void')
 
   const emit = async (order: Order) => {
     setIssuing(order.id)
@@ -566,7 +584,7 @@ const AdminDocuments = () => {
   return (
     <div className="page-stack">
       <PageHeader eyebrow="Documenti" title="Documenti di trasporto" description="Emetti, controlla, modifica e visualizza i DDT prima di scaricarli." />
-      <DemoNotice>Numerazione corrente demo: <strong>{currentYear}/{String(db.counters.ddtByYear[currentYear] ?? 0).padStart(4, '0')}</strong>. In produzione il progressivo deve essere assegnato in modo atomico dal database.</DemoNotice>
+      <DemoNotice>Nuova serie attiva: <strong>1bis/{currentYear}, 2bis/{currentYear}, …</strong>. Il progressivo viene assegnato in modo atomico e i numeri eliminati non vengono riutilizzati.</DemoNotice>
       {notice && <div className="success-banner" role="status"><CheckCircle2 size={20} /><div><strong>Documenti aggiornati</strong><span>{notice}</span></div><button onClick={() => setNotice('')} aria-label="Chiudi"><X size={17} /></button></div>}
       {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
 
@@ -589,12 +607,15 @@ const AdminDocuments = () => {
       )}
 
       <Card className="table-card">
-        <div className="table-card__title"><div><h2>Archivio DDT</h2><p>{db.documents.length} documenti generati{voidDocuments ? ` · ${voidDocuments} annullati e sostituiti` : ''}</p></div></div>
+        <div className="table-card__title">
+          <div><h2>Archivio DDT</h2><p>{visibleDocuments.length} documenti visibili{voidDocuments ? ` · ${voidDocuments} eliminati o sostituiti` : ''}</p></div>
+          {voidDocuments > 0 && <Button size="sm" variant="secondary" onClick={() => setShowVoid((current) => !current)}>{showVoid ? 'Nascondi eliminati' : 'Mostra eliminati'}</Button>}
+        </div>
         <div className="table-wrap">
           <table className="data-table responsive-table">
             <thead><tr><th>Documento</th><th>Cliente</th><th>Ordine</th><th>Data emissione</th><th>Colli</th><th>Totale</th><th>Stato</th><th>Trasporto</th><th><span className="sr-only">Azioni</span></th></tr></thead>
             <tbody>
-              {db.documents.map((document) => {
+              {visibleDocuments.map((document) => {
                 const customer = db.customers.find((item) => item.id === document.customerId)
                 const order = db.orders.find((item) => item.id === document.orderId)
                 const documentTotal = order ? calculateOrderTotals({
@@ -618,14 +639,16 @@ const AdminDocuments = () => {
                     <td className="table-actions document-table-actions">
                       <Button size="sm" variant="secondary" icon={<Eye size={16} />} disabled={document.status === 'void' || previewing === document.id} onClick={() => void preview(document)}>{previewing === document.id ? 'Apertura…' : 'Vedi'}</Button>
                       <Button size="sm" variant="secondary" icon={<Edit3 size={16} />} disabled={document.status === 'void'} onClick={() => setEditingDocument(document)}>Modifica</Button>
+                      <Button size="sm" variant="secondary" icon={<PackageCheck size={16} />} disabled={document.status === 'void'} onClick={() => setEditingQuantitiesDocument(document)}>Quantità</Button>
                       <Button size="sm" variant="secondary" icon={<Download size={16} />} disabled={document.status === 'void' || downloading === document.id} onClick={() => void download(document)}>{document.status === 'void' ? 'Sostituito' : downloading === document.id ? 'Attendi…' : 'PDF'}</Button>
+                      <Button size="sm" variant="danger" icon={<Trash2 size={16} />} disabled={document.status === 'void'} onClick={() => setDeletingDocument(document)}>Elimina</Button>
                     </td>
                   </tr>
                 )
               })}
             </tbody>
           </table>
-          {!db.documents.length && <EmptyState icon={<FileText size={29} />} title="Archivio vuoto" description="I documenti emessi compariranno qui." />}
+          {!visibleDocuments.length && <EmptyState icon={<FileText size={29} />} title="Archivio vuoto" description={voidDocuments ? 'Non ci sono DDT attivi. Puoi mostrare quelli eliminati.' : 'I documenti emessi compariranno qui.'} />}
         </div>
       </Card>
       {editingDocument && <DdtMetadataModal
@@ -638,8 +661,78 @@ const AdminDocuments = () => {
           setNotice(`Dati di ${draft.number} aggiornati.`)
         }}
       />}
+      {editingQuantitiesDocument && (() => {
+        const order = db.orders.find((item) => item.id === editingQuantitiesDocument.orderId)
+        if (!order) return null
+        return <AdminFulfillmentEditor
+          order={order}
+          document={editingQuantitiesDocument}
+          onClose={() => setEditingQuantitiesDocument(null)}
+          onSubmit={async (draft) => {
+            await adjustOrderFulfillment(order.id, draft)
+            setEditingQuantitiesDocument(null)
+            setNotice(`Quantità aggiornate: ${editingQuantitiesDocument.number} è stato sostituito da un nuovo DDT bis.`)
+          }}
+        />
+      })()}
+      {deletingDocument && <DeleteDdtModal
+        document={deletingDocument}
+        onClose={() => setDeletingDocument(null)}
+        onDelete={async (confirmationNumber, reason) => {
+          await deleteDdt(deletingDocument.id, confirmationNumber, reason)
+          setDeletingDocument(null)
+          setNotice(`${deletingDocument.number} eliminato. Il numero resta nello storico e l'ordine può essere riemesso.`)
+        }}
+      />}
     </div>
   )
+}
+
+const DeleteDdtModal = ({ document, onClose, onDelete }: {
+  document: DeliveryDocument
+  onClose: () => void
+  onDelete: (confirmationNumber: string, reason: string) => Promise<void>
+}) => {
+  const [confirmationNumber, setConfirmationNumber] = useState('')
+  const [reason, setReason] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState('')
+
+  return <Modal
+    title={`Elimina ${document.number}`}
+    description="Il DDT verrà annullato, scomparirà dall'elenco operativo e il suo numero non sarà riutilizzato. L'ordine tornerà disponibile per una nuova emissione."
+    onClose={onClose}
+  >
+    <form className="entity-form" onSubmit={async (event) => {
+      event.preventDefault()
+      setDeleting(true)
+      setError('')
+      try {
+        await onDelete(confirmationNumber, reason)
+      } catch (reasonCaught) {
+        setError(operationError(reasonCaught))
+      } finally {
+        setDeleting(false)
+      }
+    }}>
+      <div className="form-alert form-alert--error" role="note">
+        Scrivi esattamente <strong>{document.number}</strong> per confermare.
+      </div>
+      <Field label="Numero DDT di conferma">
+        <input required autoComplete="off" value={confirmationNumber} onChange={(event) => setConfirmationNumber(event.target.value)} />
+      </Field>
+      <Field label="Motivo dell'eliminazione" hint="Obbligatorio; resta nel registro amministrativo.">
+        <textarea required minLength={3} maxLength={300} rows={3} value={reason} onChange={(event) => setReason(event.target.value)} />
+      </Field>
+      {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
+      <footer className="entity-form__footer">
+        <Button type="button" variant="ghost" disabled={deleting} onClick={onClose}>Annulla</Button>
+        <Button type="submit" variant="danger" disabled={deleting || confirmationNumber.trim() !== document.number} icon={<Trash2 size={17} />}>
+          {deleting ? 'Eliminazione…' : 'Elimina DDT'}
+        </Button>
+      </footer>
+    </form>
+  </Modal>
 }
 
 const OrderPaymentModal = ({ order, onClose, onSave }: {
@@ -684,9 +777,15 @@ const DdtMetadataModal = ({ document, order, onClose, onSave }: {
   const [number, setNumber] = useState(document.number)
   const [issueDate, setIssueDate] = useState(document.issueDate)
   const [paymentMethod, setPaymentMethod] = useState(document.paymentMethod ?? order?.paymentMethod ?? 'end_of_month')
+  const isBisNumber = /^\d+bis\/\d{4}$/i.test(document.number)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  return <Modal title={`Modifica ${document.number}`} description="Puoi correggere numero, data e pagamento anche dopo l’emissione." onClose={onClose}>
+  const today = localIsoDate()
+  const minimumIssueDate = isBisNumber ? `${document.year}-01-01` : undefined
+  const maximumIssueDate = isBisNumber && `${document.year}-12-31` < today
+    ? `${document.year}-12-31`
+    : today
+  return <Modal title={`Modifica ${document.number}`} description={isBisNumber ? 'Il progressivo bis resta immutabile; puoi correggere data e pagamento.' : 'Puoi correggere numero, data e pagamento anche dopo l’emissione.'} onClose={onClose}>
     <form className="entity-form" onSubmit={async (event) => {
       event.preventDefault()
       setSaving(true)
@@ -700,8 +799,8 @@ const DdtMetadataModal = ({ document, order, onClose, onSave }: {
       }
     }}>
       <div className="form-grid">
-        <Field label="Numero DDT"><input required maxLength={80} value={number} onChange={(event) => setNumber(event.target.value)} /></Field>
-        <Field label="Data documento" hint="Può essere antecedente alla data odierna."><input required type="date" max={new Date().toISOString().slice(0, 10)} value={issueDate} onChange={(event) => setIssueDate(event.target.value)} /></Field>
+        <Field label="Numero DDT" hint={isBisNumber ? 'Assegnato dal database e non modificabile.' : undefined}><input required readOnly={isBisNumber} maxLength={80} value={number} onChange={(event) => setNumber(event.target.value)} /></Field>
+        <Field label="Data documento" hint={isBisNumber ? 'Può cambiare soltanto all’interno dello stesso anno del progressivo.' : 'Può essere antecedente alla data odierna.'}><input required type="date" min={minimumIssueDate} max={maximumIssueDate} value={issueDate} onChange={(event) => setIssueDate(event.target.value)} /></Field>
         <Field label="Metodo di pagamento" className="field--span-2"><select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as Order['paymentMethod'])}><option value="end_of_month">Fatturazione a fine mese</option><option value="on_delivery">Pagamento alla consegna</option></select></Field>
       </div>
       {error && <div className="form-alert form-alert--error" role="alert">{error}</div>}
@@ -1026,7 +1125,7 @@ const DiscountModal = ({ discount, products, onClose, onSaved }: { discount: Dis
 }
 
 const AdminCustomers = () => {
-  const { db, deleteCustomer, sendCustomerPasswordReset, importCustomers } = useApp()
+  const { db, deleteCustomer, inviteCustomer, sendCustomerPasswordReset, importCustomers } = useApp()
   const [query, setQuery] = useState('')
   const [editing, setEditing] = useState<Customer | 'new' | null>(null)
   const [notice, setNotice] = useState('')
@@ -1043,7 +1142,9 @@ const AdminCustomers = () => {
     try {
       const parsed = parseCustomersTsv(await file.text())
       const count = await importCustomers(parsed)
-      setNotice(`${count} clienti importati. Password demo fittizia: DemoCliente!2026.`)
+      setNotice(isSupabaseMode
+        ? `${count} anagrafiche importate senza creare account e senza inviare email.`
+        : `${count} clienti importati. Password demo fittizia: DemoCliente!2026.`)
     } catch (reason) {
       setError(operationError(reason))
     }
@@ -1079,6 +1180,20 @@ const AdminCustomers = () => {
     }
   }
 
+  const sendInvite = async (customer: Customer) => {
+    if (!window.confirm(`Inviare ora l'invito di accesso a ${customer.email}?`)) return
+    setBusyCustomerId(customer.id)
+    setError('')
+    try {
+      await inviteCustomer(customer.id)
+      setNotice(`Invito account inviato a ${customer.email}.`)
+    } catch (reason) {
+      setError(operationError(reason))
+    } finally {
+      setBusyCustomerId(null)
+    }
+  }
+
   return (
     <div className="page-stack">
       <PageHeader eyebrow="Anagrafiche" title="Clienti" description={isSupabaseMode ? 'Gestisci aziende, contatti, accessi e dati di fatturazione.' : 'Gestisci aziende, contatti, accessi demo e dati di fatturazione.'} action={<div className="page-header-actions"><input ref={customerInputRef} className="sr-only" type="file" accept=".txt,.tsv,text/tab-separated-values,text/plain" onChange={(event) => void importCustomerFile(event)} /><Button variant="secondary" icon={<Upload size={18} />} onClick={() => customerInputRef.current?.click()}>Importa clienti</Button><Button icon={<UserRoundPlus size={18} />} onClick={() => setEditing('new')}>Aggiungi cliente</Button></div>} />
@@ -1095,19 +1210,29 @@ const AdminCustomers = () => {
             <tbody>
               {customers.map((customer) => {
                 const customerOrders = db.orders.filter((order) => order.customerId === customer.id)
+                const toggleCustomerLabel = customer.active
+                  ? (customer.authUserId ? 'Disattiva cliente e accesso' : 'Disattiva cliente')
+                  : (customer.authUserId ? 'Riattiva cliente e accesso' : 'Riattiva cliente')
                 return (
                   <tr key={customer.id}>
                     <td data-label="Azienda"><span className="customer-cell"><i>{customer.companyName.slice(0, 1)}</i><span><strong>{customer.companyName}</strong>{!isSupabaseMode && <small>{customer.username}</small>}</span></span></td>
                     <td data-label="Contatto"><strong>{customer.contactName}</strong><small className="cell-subline">{customer.email}</small></td>
                     <td data-label="Dati fiscali"><span>P.IVA {customer.vatNumber}</span><small className="cell-subline">SDI {customer.sdiCode}</small></td>
                     <td data-label="Ordini"><strong>{customerOrders.length}</strong><small className="cell-subline">{customerOrders.filter((order) => !['delivered', 'rejected'].includes(order.status)).length} attivi</small></td>
-                    <td data-label="Accesso"><span className={`active-pill ${customer.active ? 'active-pill--yes' : ''}`}><span />{customer.active ? 'Attivo' : 'Disattivato'}</span></td>
+                    <td data-label="Accesso">
+                      <span className={`active-pill ${customer.authUserId && customer.active ? 'active-pill--yes' : ''}`}>
+                        <span />
+                        {customer.authUserId ? (customer.active ? 'Account attivo' : 'Disattivato') : 'Nessun account'}
+                      </span>
+                      {!customer.authUserId && !customer.email && <small className="cell-subline">Email mancante</small>}
+                    </td>
                     <td className="table-actions">
-                      {isSupabaseMode && <button disabled={busyCustomerId === customer.id || !customer.active} title={customer.active ? 'Invia reset password' : 'Accesso disattivato'} aria-label={`Invia reset password a ${customer.companyName}`} onClick={() => void sendPasswordReset(customer)}><KeyRound size={17} /></button>}
+                      {isSupabaseMode && !customer.authUserId && <button disabled={busyCustomerId === customer.id || !customer.active || !customer.email} title={!customer.email ? 'Aggiungi prima un indirizzo email' : 'Invia invito account'} aria-label={`Invia invito account a ${customer.companyName}`} onClick={() => void sendInvite(customer)}><UserRoundPlus size={17} /></button>}
+                      {isSupabaseMode && customer.authUserId && <button disabled={busyCustomerId === customer.id || !customer.active} title={customer.active ? 'Invia reset password' : 'Accesso disattivato'} aria-label={`Invia reset password a ${customer.companyName}`} onClick={() => void sendPasswordReset(customer)}><KeyRound size={17} /></button>}
                       <button disabled={busyCustomerId === customer.id} title="Modifica" aria-label={`Modifica ${customer.companyName}`} onClick={() => setEditing(customer)}><Pencil size={17} /></button>
                       <button
-                        title={!isSupabaseMode && customerOrders.length ? 'Impossibile eliminare: sono presenti ordini' : isSupabaseMode ? (customer.active ? 'Disattiva accesso' : 'Riattiva accesso') : 'Elimina'}
-                        aria-label={`${isSupabaseMode ? (customer.active ? 'Disattiva accesso a' : 'Riattiva accesso a') : 'Elimina'} ${customer.companyName}`}
+                        title={!isSupabaseMode && customerOrders.length ? 'Impossibile eliminare: sono presenti ordini' : isSupabaseMode ? toggleCustomerLabel : 'Elimina'}
+                        aria-label={`${isSupabaseMode ? toggleCustomerLabel : 'Elimina'} ${customer.companyName}`}
                         disabled={busyCustomerId === customer.id || (!isSupabaseMode && customerOrders.length > 0)}
                         onClick={() => void removeCustomer(customer)}
                       >{isSupabaseMode ? (customer.active ? <Ban size={17} /> : <CheckCircle2 size={17} />) : <Trash2 size={17} />}</button>
@@ -1172,7 +1297,7 @@ const CustomerModal = ({ customer, onClose, onSaved }: { customer?: Customer; on
       onSaved(customer
         ? `${customer.companyName} è stato aggiornato.`
         : isSupabaseMode
-          ? 'Cliente creato e invito di accesso inviato.'
+          ? 'Anagrafica cliente creata senza inviare email. Puoi già inserire ordini.'
           : 'Nuova anagrafica demo e credenziale fittizia create.')
     } catch (reason) {
       setError(operationError(reason))
@@ -1182,7 +1307,7 @@ const CustomerModal = ({ customer, onClose, onSaved }: { customer?: Customer; on
   }
 
   return (
-    <Modal title={customer ? 'Modifica cliente' : 'Nuovo cliente'} description={isSupabaseMode ? 'Inserisci nome ed email del referente: l’email sarà l’utente per accedere al gestionale.' : 'Dati e credenziali sono esclusivamente fittizi nella demo.'} onClose={onClose} size="lg">
+    <Modal title={customer ? 'Modifica cliente' : 'Nuovo cliente'} description={isSupabaseMode ? 'L’anagrafica può essere usata subito per gli ordini. L’account e l’invito email restano facoltativi e separati.' : 'Dati e credenziali sono esclusivamente fittizi nella demo.'} onClose={onClose} size="lg">
       <form className="entity-form" onSubmit={(event) => void submit(event)}>
         <fieldset><legend><Building2 size={17} /> Azienda</legend><div className="form-grid">
           <Field label="Ragione sociale" className="field--span-2"><input required value={form.companyName} onChange={(event) => change('companyName', event.target.value)} /></Field>
@@ -1192,14 +1317,14 @@ const CustomerModal = ({ customer, onClose, onSaved }: { customer?: Customer; on
           <Field label="PEC"><input type="email" value={form.pec} onChange={(event) => change('pec', event.target.value)} /></Field>
         </div></fieldset>
         <fieldset className="customer-access-section"><legend><Mail size={17} /> Utente e accesso al gestionale</legend><div className="form-grid">
-          {isSupabaseMode && <div className="access-user-note field--span-2"><UserRoundPlus size={20} /><span><strong>Crea l’utente del cliente</strong>Il nome identifica la persona; l’email sarà usata per entrare e ricevere l’invito a impostare la password.</span></div>}
-          <Field label="Nome e cognome utente"><input required value={form.contactName} onChange={(event) => change('contactName', event.target.value)} /></Field>
+          {isSupabaseMode && <div className="access-user-note field--span-2"><UserRoundPlus size={20} /><span><strong>Nessun invito automatico</strong>Salvare questa scheda non crea credenziali e non invia email. Potrai usare “Invita account” dalla lista clienti quando vorrai.</span></div>}
+          <Field label="Nome e cognome referente"><input required={!isSupabaseMode} value={form.contactName} onChange={(event) => change('contactName', event.target.value)} /></Field>
           <Field label="Telefono"><input value={form.phone} onChange={(event) => change('phone', event.target.value)} /></Field>
-          <Field label="Email di accesso" hint={isSupabaseMode ? 'Questa email diventa il nome utente del portale.' : undefined}><input type="email" required value={form.email} onChange={(event) => change('email', event.target.value)} /></Field>
+          <Field label={isSupabaseMode ? 'Email (facoltativa)' : 'Email di accesso'} hint={isSupabaseMode ? 'Diventerà il nome utente soltanto quando invierai l’invito.' : undefined}><input type="email" required={!isSupabaseMode || Boolean(customer?.authUserId)} value={form.email} onChange={(event) => change('email', event.target.value)} /></Field>
           {!isSupabaseMode && <Field label="Nome utente"><input required value={form.username} onChange={(event) => change('username', event.target.value)} /></Field>}
           {!isSupabaseMode && <Field label="Password demo" hint="Solo locale; mai salvata in tabelle Supabase."><div className="input-with-icon"><KeyRound size={17} /><input type="text" minLength={8} required value={demoPassword} onChange={(event) => setDemoPassword(event.target.value)} /></div></Field>}
-          {isSupabaseMode && <div className="secure-auth-note"><ShieldCheck size={19} /><span><strong>Password tramite invito</strong>Dopo il salvataggio, l’utente riceve il link per impostarla in sicurezza.</span></div>}
-          <label className="toggle-field"><input type="checkbox" disabled={isSupabaseMode && !customer} checked={form.active} onChange={(event) => change('active', event.target.checked)} /><span /><div><strong>Accesso attivo</strong><small>{isSupabaseMode && !customer ? 'Il nuovo account viene invitato attivo; potrai disattivarlo in seguito.' : 'Il cliente può entrare nel portale.'}</small></div></label>
+          {isSupabaseMode && <div className="secure-auth-note"><ShieldCheck size={19} /><span><strong>Account separato</strong>{customer?.authUserId ? 'Questo cliente ha già un account collegato.' : 'Il cliente resta senza password finché non scegli esplicitamente di invitarlo.'}</span></div>}
+          <label className="toggle-field"><input type="checkbox" checked={form.active} onChange={(event) => change('active', event.target.checked)} /><span /><div><strong>Cliente attivo</strong><small>Se attivo, può essere selezionato dall’amministratore per inserire nuovi ordini.</small></div></label>
         </div></fieldset>
         <fieldset><legend><MapPin size={17} /> Indirizzo di fatturazione</legend><AddressFields value={form.billingAddress} onChange={(key, value) => changeAddress('billingAddress', key, value)} /></fieldset>
         <fieldset><legend><Truck size={17} /> Indirizzo di consegna</legend>

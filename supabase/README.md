@@ -232,9 +232,10 @@ admin_adjust_order_fulfillment(
 ) -> orders
 ```
 
-Ogni riga di `p_items` contiene `product_id` e `fulfilled_quantity`, compresa
-tra zero e la quantità ordinata. Tutte le righe devono essere presenti e almeno
-una deve restare positiva. La RPC conserva prezzi e richiesta originale,
+Ogni riga di `p_items` contiene `product_id` e `fulfilled_quantity`, un intero
+compreso tra 0 e 999. Può essere inferiore o superiore alla quantità ordinata;
+la richiesta originale resta distinta e immutata. Tutte le righe devono essere
+presenti e almeno una deve restare positiva. La RPC conserva prezzi e richiesta originale,
 ricalcola gli importi, registra operatore/motivo/audit e incrementa `version`.
 Se esiste già un DDT valido, lo marca `void` e crea nella stessa transazione un
 DDT sostitutivo con un nuovo progressivo. Un ordine con pagamento alla consegna
@@ -301,6 +302,22 @@ transazione, assegna un progressivo univoco per serie/anno, salva gli snapshot
 — inclusa la modalità di pagamento — e porta l'ordine a `in_delivery`. Una ripetizione per lo stesso ordine restituisce
 lo stesso DDT e non consuma un nuovo numero.
 
+Dalla migrazione del 2 agosto 2026 ogni nuovo documento, compresi i sostitutivi,
+usa la serie tecnica `BIS` e il formato leggibile `1bis/2026`, `2bis/2026`, ….
+I contatori e i documenti storici della serie A restano invariati. Numero,
+serie, anno strutturato e progressivo di un DDT BIS non sono modificabili.
+
+Per eliminare un DDT non pagato usare:
+
+```text
+admin_delete_delivery_document(document_id, numero_da_confermare, motivo)
+```
+
+L'operazione richiede un amministratore, il numero esatto e un motivo; marca il
+documento `void`, conserva audit e numero consumato e riporta l'ordine a
+`accepted` per consentire una nuova emissione. Non effettua una cancellazione
+fisica né riutilizza progressivi.
+
 La consegna standard è 3,50 EUR netti con IVA fissa al 22%. L'admin può
 rettificarla sul DDT con `admin_update_delivery_fee(document_id, fee_net)`;
 la RPC aggiorna anche il totale ordine, incrementa la versione e registra
@@ -315,6 +332,20 @@ Campi, serie, arrotondamenti e conservazione vanno validati con il
 commercialista prima della produzione.
 
 ## Gestione utenti
+
+Un cliente può esistere in `customers` senza alcuna riga in `customer_users`.
+In questo stato l'amministratore può già inserirgli ordini, ma il cliente non
+ha credenziali e non riceve email. Per importare fino a 500 anagrafiche in una
+transazione usare:
+
+```text
+admin_upsert_customers(customers_json)
+```
+
+La RPC deduplica per P.IVA normalizzata, registra l'audit e non crea identità
+Auth. L'account può essere collegato in seguito chiamando `admin-users` con
+azione `invite` ed `existing_customer_id`; soltanto quell'azione esplicita
+invia l'email Supabase.
 
 `admin-users` accetta solo `POST` autenticati da un profilo `admin` attivo.
 

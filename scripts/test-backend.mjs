@@ -32,6 +32,13 @@ const migrationFiles = (await readdir('supabase/migrations'))
   .filter((file) => file.endsWith('.sql'))
   .sort()
 for (const [index, file] of migrationFiles.entries()) {
+  if (file === '20260802110000_ddt_bis_and_deletion.sql') {
+    // Simula un contatore storico gia presente sul progetto prima del cut-over.
+    await db.exec(`
+      insert into public.document_counters(document_type, series, document_year, last_number)
+      values ('DDT', 'A', extract(year from current_date)::integer, 41)
+    `)
+  }
   let migration = await readFile(`supabase/migrations/${file}`, 'utf8')
   if (index === 0) {
     migration = migration.replace(
@@ -404,6 +411,17 @@ await db.query(
    values ('30000000-0000-4000-8000-000000000001', $1)`,
   [clientId],
 )
+const secondClientId = '10000000-0000-4000-8000-000000000003'
+await db.query('insert into auth.users(id, email) values ($1, $2)', [secondClientId, 'client2@example.invalid'])
+await expectFailure(
+  () => db.query(
+    `insert into public.customer_users(customer_id, user_id)
+     values ('30000000-0000-4000-8000-000000000001', $1)`,
+    [secondClientId],
+  ),
+  /duplicate key|unique constraint/i,
+  'Second Auth account for the same customer',
+)
 await db.exec(`set request.jwt.claim.sub = '${clientId}'; set request.jwt.claim.role = 'authenticated';`)
 await expectFailure(
   () => db.query(
@@ -528,11 +546,15 @@ const deliveryResult = await db.query(
   [confirmed.id, confirmed.version],
 )
 const delivery = deliveryResult.rows[0]
+const currentDocumentYear = Number((await db.query('select extract(year from current_date)::integer as year')).rows[0].year)
 if (
   delivery.payment_method_snapshot !== 'on_delivery'
   || delivery.customer_snapshot?.paymentMethod !== 'on_delivery'
+  || delivery.series !== 'BIS'
+  || Number(delivery.sequence_number) !== 1
+  || delivery.display_number !== `1bis/${currentDocumentYear}`
 ) {
-  throw new Error(`DDT is missing immutable payment data: ${JSON.stringify(delivery)}`)
+  throw new Error(`First BIS DDT or payment snapshot is incorrect: ${JSON.stringify(delivery)}`)
 }
 
 const deliveryEvent = await db.query(
@@ -666,22 +688,47 @@ fulfillmentOrder = deliveredFulfillment.rows[0]
 const deliveredAdjustment = await db.query(
   'select * from public.admin_adjust_order_fulfillment($1::uuid, $2::jsonb, $3::integer, $4::text)',
   [fulfillmentOrder.id, JSON.stringify([
-    { product_id: productIds['TEST-PER-KG'], fulfilled_quantity: 2 },
-    { product_id: productIds['TEST-PER-UNIT'], fulfilled_quantity: 1 },
-  ]), fulfillmentOrder.version, 'Rettifica dopo consegna test'],
+    { product_id: productIds['TEST-PER-KG'], fulfilled_quantity: 5 },
+    { product_id: productIds['TEST-PER-UNIT'], fulfilled_quantity: 3 },
+  ]), fulfillmentOrder.version, 'Aumento quantità dopo consegna test'],
 )
 fulfillmentOrder = deliveredAdjustment.rows[0]
 if (
   fulfillmentOrder.status !== 'delivered'
-  || Number(fulfillmentOrder.net_total) !== 29.04
-  || Number(fulfillmentOrder.vat_total) !== 3.73
-  || Number(fulfillmentOrder.gross_total) !== 32.77
+  || Number(fulfillmentOrder.net_total) !== 67.67
+  || Number(fulfillmentOrder.vat_total) !== 8.25
+  || Number(fulfillmentOrder.gross_total) !== 75.92
 ) {
   throw new Error(`Delivered adjustment changed status or totals incorrectly: ${JSON.stringify(fulfillmentOrder)}`)
 }
 
+await expectFailure(
+  () => db.query(
+    'select * from public.admin_adjust_order_fulfillment($1::uuid, $2::jsonb, $3::integer, $4::text)',
+    [fulfillmentOrder.id, JSON.stringify([
+      { product_id: productIds['TEST-PER-KG'], fulfilled_quantity: 1000 },
+      { product_id: productIds['TEST-PER-UNIT'], fulfilled_quantity: 3 },
+    ]), fulfillmentOrder.version, 'Superamento limite test'],
+  ),
+  /between zero and 999/i,
+  'Fulfillment quantity above 999',
+)
+const increasedFulfilledItems = await db.query(
+  `select sku_snapshot, quantity, fulfilled_quantity
+   from public.order_items where order_id = $1 order by sku_snapshot`,
+  [fulfillmentOrder.id],
+)
+if (
+  Number(increasedFulfilledItems.rows[0].quantity) !== 4
+  || Number(increasedFulfilledItems.rows[0].fulfilled_quantity) !== 5
+  || Number(increasedFulfilledItems.rows[1].quantity) !== 2
+  || Number(increasedFulfilledItems.rows[1].fulfilled_quantity) !== 3
+) {
+  throw new Error(`Increased fulfillment did not preserve requested quantities: ${JSON.stringify(increasedFulfilledItems.rows)}`)
+}
+
 const replacementDocuments = await db.query(
-  `select id, status, sequence_number, revision_number, replaces_document_id, items_snapshot,
+  `select id, status, sequence_number, revision_number, replaces_document_id, items_snapshot, packages,
           delivery_fee_net, delivery_fee_vat_rate
    from public.delivery_documents where order_id = $1 order by sequence_number`,
   [fulfillmentOrder.id],
@@ -697,7 +744,9 @@ if (
   || Number(readyReplacement.sequence_number) <= Number(voidDocument.sequence_number)
   || Number(readyReplacement.delivery_fee_net) !== 4.2
   || Number(readyReplacement.delivery_fee_vat_rate) !== 22
-  || JSON.stringify(readyReplacement.items_snapshot.map((item) => Number(item.quantity)).sort((a, b) => a - b)) !== JSON.stringify([1, 2])
+  || Number(readyReplacement.packages) !== 5
+  || JSON.stringify(readyReplacement.items_snapshot.map((item) => Number(item.quantity)).sort((a, b) => a - b)) !== JSON.stringify([3, 5])
+  || JSON.stringify(readyReplacement.items_snapshot.map((item) => Number(item.orderedQuantity)).sort((a, b) => a - b)) !== JSON.stringify([2, 4])
 ) {
   throw new Error(`Replacement DDT history is incorrect: ${JSON.stringify(replacementDocuments.rows)}`)
 }
@@ -803,21 +852,288 @@ const editableDdt = (await db.query(
    )`,
   [discountedOrder.id, discountedOrder.version],
 )).rows[0]
+await expectFailure(
+  () => db.query(
+    `select * from public.admin_update_delivery_document_metadata(
+       $1::uuid, 'DDT-TEST-NON-CONSENTITO', current_date,
+       'end_of_month'::public.payment_method
+     )`,
+    [editableDdt.id],
+  ),
+  /BIS delivery document number is immutable/i,
+  'BIS document number mutation',
+)
 const editedDdt = (await db.query(
   `select * from public.admin_update_delivery_document_metadata(
-     $1::uuid, 'DDT-TEST-ANTECEDENTE', current_date - 5,
+     $1::uuid, $2::text,
+     greatest(current_date - 5, date_trunc('year', current_date)::date),
      'end_of_month'::public.payment_method
    )`,
-  [editableDdt.id],
+  [editableDdt.id, editableDdt.display_number],
 )).rows[0]
 const editedOrder = (await db.query('select * from public.orders where id = $1', [discountedOrder.id])).rows[0]
 if (
-  editedDdt.display_number !== 'DDT-TEST-ANTECEDENTE'
-  || String(editedDdt.issued_on) !== String((await db.query('select current_date - 5 as expected_date')).rows[0].expected_date)
+  editedDdt.display_number !== editableDdt.display_number
+  || String(editedDdt.issued_on) !== String((await db.query(
+    "select greatest(current_date - 5, date_trunc('year', current_date)::date) as expected_date",
+  )).rows[0].expected_date)
   || editedDdt.payment_method_snapshot !== 'end_of_month'
   || editedOrder.payment_method_snapshot !== 'end_of_month'
 ) {
   throw new Error(`DDT metadata update failed: ${JSON.stringify({ editedDdt, editedOrder })}`)
+}
+
+await expectFailure(
+  () => db.query(
+    'select * from public.admin_delete_delivery_document($1::uuid, $2::text, $3::text)',
+    [delivery.id, delivery.display_number, 'Tentativo eliminazione DDT pagato'],
+  ),
+  /paid delivery document cannot be deleted/i,
+  'Paid DDT deletion',
+)
+await expectFailure(
+  () => db.query(
+    'select * from public.admin_delete_delivery_document($1::uuid, $2::text, $3::text)',
+    [editedDdt.id, 'numero errato', 'Conferma numero errata'],
+  ),
+  /number confirmation does not match/i,
+  'DDT deletion confirmation',
+)
+
+await db.exec(`set request.jwt.claim.sub = '${clientId}'; set request.jwt.claim.role = 'authenticated';`)
+await expectFailure(
+  () => db.query(
+    'select * from public.admin_delete_delivery_document($1::uuid, $2::text, $3::text)',
+    [editedDdt.id, editedDdt.display_number, 'Tentativo cliente'],
+  ),
+  /administrator access required/i,
+  'Non-admin DDT deletion',
+)
+await db.exec(`set request.jwt.claim.sub = '${adminId}'; set request.jwt.claim.role = 'authenticated';`)
+
+const deletedDdt = (await db.query(
+  'select * from public.admin_delete_delivery_document($1::uuid, $2::text, $3::text)',
+  [editedDdt.id, editedDdt.display_number, 'Documento di prova da riemettere'],
+)).rows[0]
+const reopenedOrder = (await db.query(
+  'select * from public.orders where id = $1::uuid',
+  [editedDdt.order_id],
+)).rows[0]
+const deletionEvidence = (await db.query(
+  `select count(*)::integer as audit_count
+   from public.admin_audit_log
+   where action = 'delivery_document.deleted'
+     and details ->> 'delivery_document_id' = $1::text`,
+  [editedDdt.id],
+)).rows[0]
+if (
+  deletedDdt.status !== 'void'
+  || reopenedOrder.status !== 'accepted'
+  || reopenedOrder.version !== editedOrder.version + 1
+  || deletionEvidence.audit_count !== 1
+) {
+  throw new Error(`DDT logical deletion failed: ${JSON.stringify({ deletedDdt, reopenedOrder, deletionEvidence })}`)
+}
+await db.query(
+  'select * from public.admin_delete_delivery_document($1::uuid, $2::text, $3::text)',
+  [editedDdt.id, editedDdt.display_number, 'Retry idempotente'],
+)
+const deletionAuditAfterRetry = (await db.query(
+  `select count(*)::integer as audit_count
+   from public.admin_audit_log
+   where action = 'delivery_document.deleted'
+     and details ->> 'delivery_document_id' = $1::text`,
+  [editedDdt.id],
+)).rows[0]
+if (deletionAuditAfterRetry.audit_count !== 1) {
+  throw new Error(`DDT deletion retry duplicated audit: ${JSON.stringify(deletionAuditAfterRetry)}`)
+}
+const reissuedDdt = (await db.query(
+  `select * from public.prepare_delivery_document(
+     $1::uuid, $2::integer, 'A', current_date, now(), 'Vendita',
+     '{}'::jsonb, null::jsonb, null::integer, 'Riemissione dopo eliminazione test'
+   )`,
+  [reopenedOrder.id, reopenedOrder.version],
+)).rows[0]
+if (
+  reissuedDdt.series !== 'BIS'
+  || Number(reissuedDdt.sequence_number) <= Number(editedDdt.sequence_number)
+  || reissuedDdt.display_number !== `${Number(reissuedDdt.sequence_number)}bis/${currentDocumentYear}`
+) {
+  throw new Error(`DDT reissue reused or misformatted a number: ${JSON.stringify(reissuedDdt)}`)
+}
+
+const customerBatch = [{
+  legal_name: 'Cliente manuale senza account - SOLO TEST',
+  contact_name: '',
+  vat_number: '09999999999',
+  tax_code: '',
+  sdi_code: '',
+  pec: '',
+  email: '',
+  phone: '',
+  billing_address: {
+    street: 'Via test 1', city: 'Roma', province: 'RM', postalCode: '00100', country: 'Italia',
+  },
+  shipping_address: {
+    street: 'Via test 1', city: 'Roma', province: 'RM', postalCode: '00100', country: 'Italia',
+  },
+  payment_method: 'end_of_month',
+  delivery_fee_mode: 'standard',
+  active: true,
+}]
+
+// La normale scheda cliente usa INSERT/UPDATE diretto con il ruolo
+// authenticated: anche l'indice normalizzato deve essere valutabile con gli
+// stessi privilegi di un admin reale.
+await db.exec('set role authenticated')
+try {
+  await db.query(
+    `insert into public.customers (legal_name, vat_number, price_list_id)
+     values ('Cliente inserimento RLS - SOLO TEST', '08888888888',
+             '00000000-0000-4000-8000-000000000001'::uuid)`,
+  )
+} finally {
+  await db.exec('reset role')
+}
+
+const importedCustomers = await db.query(
+  'select * from public.admin_upsert_customers($1::jsonb)',
+  [JSON.stringify(customerBatch)],
+)
+const manualCustomerId = importedCustomers.rows[0]?.customer_id
+const importedCustomerEvidence = (await db.query(
+  `select c.email,
+          (select count(*)::integer from public.customer_users cu where cu.customer_id = c.id) as identity_count
+   from public.customers c where c.id = $1::uuid`,
+  [manualCustomerId],
+)).rows[0]
+if (
+  importedCustomers.rows.length !== 1
+  || importedCustomers.rows[0].outcome !== 'inserted'
+  || importedCustomerEvidence.email !== ''
+  || importedCustomerEvidence.identity_count !== 0
+) {
+  throw new Error(`Manual customer import created identity or changed blank email: ${JSON.stringify({ importedCustomers: importedCustomers.rows, importedCustomerEvidence })}`)
+}
+const repeatedCustomerImport = await db.query(
+  'select * from public.admin_upsert_customers($1::jsonb)',
+  [JSON.stringify(customerBatch)],
+)
+if (repeatedCustomerImport.rows[0]?.customer_id !== manualCustomerId || repeatedCustomerImport.rows[0]?.outcome !== 'unchanged') {
+  throw new Error(`Customer batch upsert is not idempotent: ${JSON.stringify(repeatedCustomerImport.rows)}`)
+}
+
+await db.query(
+  `update public.customers
+   set payment_method = 'on_delivery', delivery_fee_mode = 'free',
+       phone = '+39 000 000000', tax_code = 'TEST-PRESERVE'
+   where id = $1::uuid`,
+  [manualCustomerId],
+)
+const sparseReimport = await db.query(
+  'select * from public.admin_upsert_customers($1::jsonb)',
+  [JSON.stringify([{
+    legal_name: 'Cliente manuale aggiornato - SOLO TEST',
+    vat_number: '09999999999',
+  }])],
+)
+const preservedCustomerSettings = (await db.query(
+  `select payment_method, delivery_fee_mode, phone, tax_code
+   from public.customers where id = $1::uuid`,
+  [manualCustomerId],
+)).rows[0]
+if (
+  sparseReimport.rows[0]?.outcome !== 'updated'
+  || preservedCustomerSettings.payment_method !== 'on_delivery'
+  || preservedCustomerSettings.delivery_fee_mode !== 'free'
+  || preservedCustomerSettings.phone !== '+39 000 000000'
+  || preservedCustomerSettings.tax_code !== 'TEST-PRESERVE'
+) {
+  throw new Error(`Sparse customer re-import reset existing values: ${JSON.stringify({
+    sparseReimport: sparseReimport.rows,
+    preservedCustomerSettings,
+  })}`)
+}
+
+const manualCustomerOrder = (await db.query(
+  `select * from public.place_order(
+     null, current_date + 4, 'Ordine admin senza account cliente', $1::jsonb,
+     'end_of_month'::public.payment_method, null, $2::uuid,
+     '40000000-0000-4000-8000-000000000100'::uuid
+   )`,
+  [JSON.stringify([{ product_id: productIds['TEST-PER-UNIT'], quantity: 1 }]), manualCustomerId],
+)).rows[0]
+if (
+  manualCustomerOrder.status !== 'submitted'
+  || manualCustomerOrder.customer_id !== manualCustomerId
+  || manualCustomerOrder.created_by !== adminId
+  || manualCustomerOrder.customer_snapshot?.email !== ''
+) {
+  throw new Error(`Admin could not order for a customer without identity: ${JSON.stringify(manualCustomerOrder)}`)
+}
+
+await db.exec(`set request.jwt.claim.sub = '${clientId}'; set request.jwt.claim.role = 'authenticated';`)
+await expectFailure(
+  () => db.query('select * from public.admin_upsert_customers($1::jsonb)', [JSON.stringify(customerBatch)]),
+  /active administrator required/i,
+  'Non-admin customer batch import',
+)
+let clientDocumentVisibility
+await db.exec('set role authenticated')
+try {
+  clientDocumentVisibility = (await db.query(`
+    select
+      count(*) filter (where status = 'ready')::integer as ready_count,
+      count(*) filter (where status = 'void')::integer as void_count
+    from public.delivery_documents
+  `)).rows[0]
+} finally {
+  await db.exec('reset role')
+}
+if (clientDocumentVisibility.ready_count < 1 || clientDocumentVisibility.void_count !== 0) {
+  throw new Error(`Client DDT visibility exposed void history: ${JSON.stringify(clientDocumentVisibility)}`)
+}
+await db.exec(`set request.jwt.claim.sub = '${adminId}'; set request.jwt.claim.role = 'authenticated';`)
+
+const legacyCounterEvidence = (await db.query(`
+  select last_number::integer
+  from public.document_counters
+  where document_type = 'DDT' and series = 'A'
+`)).rows[0]
+const obsoleteCounterEvidence = (await db.query(`
+  select count(*)::integer as counter_count
+  from public.document_counters
+  where document_type = 'DDT' and series not in ('A', 'BIS')
+`)).rows[0]
+if (legacyCounterEvidence?.last_number !== 41 || obsoleteCounterEvidence.counter_count !== 0) {
+  throw new Error(`BIS cut-over changed or consumed obsolete counters: ${JSON.stringify({
+    legacyCounterEvidence,
+    obsoleteCounterEvidence,
+  })}`)
+}
+
+await db.exec(`update private.project_heartbeat set last_seen_at = now() - interval '2 hours'`)
+let firstHeartbeat
+let repeatedHeartbeat
+await db.exec('set role anon')
+try {
+  await expectFailure(
+    () => db.query('select * from private.project_heartbeat'),
+    /permission denied/i,
+    'Anonymous heartbeat table read',
+  )
+  firstHeartbeat = (await db.query('select public.keep_project_active() as seen_at')).rows[0].seen_at
+  repeatedHeartbeat = (await db.query('select public.keep_project_active() as seen_at')).rows[0].seen_at
+} finally {
+  await db.exec('reset role')
+}
+if (
+  !firstHeartbeat
+  || String(firstHeartbeat) !== String(repeatedHeartbeat)
+  || Date.now() - new Date(firstHeartbeat).getTime() > 60_000
+) {
+  throw new Error(`Heartbeat RPC is unavailable or not rate limited: ${JSON.stringify({ firstHeartbeat, repeatedHeartbeat })}`)
 }
 
 console.log(JSON.stringify({
