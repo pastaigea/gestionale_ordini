@@ -169,6 +169,7 @@ jobs:
 
             if docker run \
               --rm \
+              --network host \
               --env PGDATABASE \
               "$PG_DUMP_IMAGE" \
               pg_dump \
