@@ -19,15 +19,30 @@ le esecuzioni continuino ad arrivare.
 
 ## Contenuto e conservazione
 
-Ogni esecuzione produce, seguendo la procedura ufficiale Supabase:
+Ogni esecuzione usa `pg_dump` PostgreSQL 17 dall'immagine Docker Official
+Image `postgres:17.8-bookworm`, bloccata a un digest immutabile. La connection
+string viene passata a libpq esclusivamente tramite la variabile d'ambiente
+`PGDATABASE`: non compare negli argomenti di `docker` o `pg_dump`.
 
-- `schema.sql` con lo schema;
-- `data.sql` con i dati tramite `COPY`, esclusi
+Il backup produce:
+
+- `schema.sql` con le definizioni degli schemi applicativi `public` e
+  `private`, senza proprietari ma con ACL, inclusi i permessi applicativi dei
+  ruoli standard `anon`, `authenticated` e `service_role`;
+- `data.sql` con i dati di `public`, `private`, `auth` e `storage` tramite
+  `COPY`, esclusi i registri di migrazione gestiti
+  `auth.schema_migrations` e `storage.migrations` e le tabelle
   `storage.buckets_vectors` e `storage.vector_indexes`;
 - `history_schema.sql` e `history_data.sql` con il registro
   `supabase_migrations`, necessario per non riapplicare migrazioni gia
   presenti dopo un ripristino;
-- `manifest.txt` e `SHA256SUMS` per identificare e verificare i file.
+- `manifest.txt`, che registra anche immagine e versione effettiva di
+  `pg_dump`, e `SHA256SUMS` per identificare e verificare i file.
+
+La separazione e intenzionale: `auth` e `storage` sono schemi gestiti da
+Supabase, quindi il backup conserva le loro righe ma non prova a ricrearne le
+definizioni. Il progetto di destinazione deve avere servizi e schemi gestiti
+gia inizializzati e compatibili.
 
 I sei file vengono compressi e cifrati con
 [age](https://github.com/FiloSottile/age) prima di lasciare il runner. GitHub
@@ -131,7 +146,11 @@ postgresql://gestionale_backup.PROJECT_REF:PASSWORD_DEDICATA@HOST_POOLER:5432/po
 `SUPABASE_DB_URL` e un secret sensibile, ma concede soltanto la lettura
 necessaria al dump. Non usare nomi `VITE_*`, non commetterlo, non inserirvi la
 password del ruolo `postgres` e non sostituirlo con una chiave `service_role`.
-Il workflow non richiede `SUPABASE_ACCESS_TOKEN`.
+Il workflow non richiede `SUPABASE_ACCESS_TOKEN` e non usa la Supabase CLI per
+il dump. Quest'ultima invoca `pg_dump` con il ruolo `postgres`; il ruolo
+dedicato e volutamente non autorizzato ad assumerlo. L'esecuzione diretta di
+`pg_dump` non emette `SET ROLE` e mantiene la connessione con
+`gestionale_backup` per tutta l'operazione.
 
 La identity privata `supabase-backup-age-key.txt` resta soltanto nelle copie
 locali protette indicate al punto 2: non va aggiunta al repository e non va
@@ -198,8 +217,9 @@ in chiaro appena terminata la verifica o il ripristino.
 ## 7. Prova di ripristino
 
 Un backup non verificato tramite restore non e sufficiente. Almeno ogni tre
-mesi creare un progetto Supabase di prova vuoto, abilitarvi le estensioni usate
-dal gestionale e recuperare la sua nuova Session pooler URL in `NEW_DB_URL`.
+mesi creare un progetto Supabase di prova vuoto, attendere che Auth e Storage
+abbiano inizializzato i rispettivi schemi, abilitarvi le estensioni usate dal
+gestionale e recuperare la sua nuova Session pooler URL in `NEW_DB_URL`.
 Ripristinare poi con `psql`:
 
 ```text
@@ -232,6 +252,14 @@ Eseguire questa prova soltanto su un database nuovo e sacrificabile. Prima di
 un ripristino reale sul progetto di produzione concordare finestra di fermo,
 punto di recupero e controlli successivi.
 
+`pg_dump` grezzo non applica le trasformazioni di portabilita della Supabase
+CLI. Il dump limita percio esplicitamente gli schemi, omette i proprietari e
+separa le migrazioni, ma conserva le ACL necessarie all'applicazione. I ruoli
+standard devono gia esistere nella destinazione. Resta comunque possibile un
+errore di restore se il progetto di destinazione usa una versione
+incompatibile delle tabelle gestite di Auth o Storage. La prova trimestrale
+serve anche a rilevare questo tipo di deriva prima di un'emergenza.
+
 Dopo il restore verificare almeno:
 
 - presenza di clienti, ordini, righe, DDT, contatori e audit;
@@ -244,6 +272,8 @@ Dopo il restore verificare almeno:
 La guida Supabase completa segnala anche casi particolari per ruoli, Vault,
 pubblicazioni Realtime e modifiche agli schemi `auth`/`storage`:
 [Backup and Restore using the CLI](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore).
+L'immagine usata dal workflow e la
+[Docker Official Image di PostgreSQL](https://hub.docker.com/_/postgres).
 
 ## Dati non coperti dal dump
 

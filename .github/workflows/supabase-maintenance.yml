@@ -68,6 +68,10 @@ jobs:
     if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # Docker Official Image, minor e manifest bloccati. Fonte del digest:
+      # https://hub.docker.com/_/postgres/tags?name=17.8-bookworm
+      PG_DUMP_IMAGE: postgres:17.8-bookworm@sha256:45e40832755b7133da62e701ee496d65afc5e4527c8ff5446c2f3bdd11bc58e3
 
     steps:
       - name: Definisci percorsi temporanei
@@ -83,17 +87,17 @@ jobs:
       - name: Verifica configurazione obbligatoria
         shell: bash
         env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PGDATABASE: ${{ secrets.SUPABASE_DB_URL }}
           BACKUP_AGE_RECIPIENT: ${{ vars.BACKUP_AGE_RECIPIENT }}
         run: |
           set -Eeuo pipefail
 
-          if [[ -z "${SUPABASE_DB_URL:-}" ]]; then
+          if [[ -z "${PGDATABASE:-}" ]]; then
             echo "::error title=Configurazione mancante::Aggiungere il secret Actions SUPABASE_DB_URL."
             exit 1
           fi
 
-          case "$SUPABASE_DB_URL" in
+          case "$PGDATABASE" in
             postgres://*|postgresql://*) ;;
             *)
               echo "::error title=Configurazione non valida::SUPABASE_DB_URL deve essere una connection string PostgreSQL."
@@ -101,7 +105,7 @@ jobs:
               ;;
           esac
 
-          case "$SUPABASE_DB_URL" in
+          case "$PGDATABASE" in
             postgres://gestionale_backup.*:*@*:5432/*|postgresql://gestionale_backup.*:*@*:5432/*) ;;
             *)
               echo "::error title=Ruolo backup non valido::Usare gestionale_backup tramite Session pooler sulla porta 5432."
@@ -121,11 +125,6 @@ jobs:
               exit 1
               ;;
           esac
-
-      - name: Installa Supabase CLI
-        uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
-        with:
-          version: 2.109.1
 
       - name: Installa age
         shell: bash
@@ -154,64 +153,92 @@ jobs:
       - name: Esporta schema e dati
         shell: bash
         env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # libpq legge la connection string da PGDATABASE. Docker riceve solo
+          # il nome della variabile: il secret non compare negli argomenti.
+          PGDATABASE: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set -Eeuo pipefail
           umask 077
 
           dump_or_fail() {
             local label="$1"
-            shift
-            local output
+            local destination="$2"
+            shift 2
+            local error_file="$BACKUP_WORK_DIR/.pg-dump-${label}.stderr"
             local category="errore_non_classificato"
 
-            if output="$(supabase db dump "$@" 2>&1)"; then
+            if docker run \
+              --rm \
+              --env PGDATABASE \
+              "$PG_DUMP_IMAGE" \
+              pg_dump \
+              --format=plain \
+              --no-owner \
+              "$@" \
+              > "$destination" \
+              2> "$error_file"; then
+              rm -f -- "$error_file"
               return 0
             fi
 
-            if grep -qi 'password authentication failed' <<< "$output"; then
+            if grep -Eqi 'password authentication failed|no password supplied|SASL authentication' "$error_file"; then
               category="autenticazione_database_fallita"
-            elif grep -Eqi 'permission denied|insufficient privilege' <<< "$output"; then
+            elif grep -Eqi 'permission denied|insufficient privilege|must be owner' "$error_file"; then
               category="permesso_lettura_insufficiente"
-            elif grep -Eqi 'must be (a )?superuser|superuser required' <<< "$output"; then
+            elif grep -Eqi 'must be (a )?superuser|superuser required' "$error_file"; then
               category="privilegio_superuser_richiesto"
-            elif grep -qi 'read-only transaction' <<< "$output"; then
+            elif grep -qi 'read-only transaction' "$error_file"; then
               category="operazione_non_compatibile_con_sola_lettura"
-            elif grep -Eqi 'server version mismatch|aborting because of server version mismatch' <<< "$output"; then
+            elif grep -Eqi 'server version.*pg_dump version|aborting because of server version mismatch' "$error_file"; then
               category="versione_pg_dump_non_compatibile"
-            elif grep -Eqi 'failed to connect|connection refused|connection timed out|network is unreachable' <<< "$output"; then
+            elif grep -Eqi 'could not connect|connection .*failed|connection refused|timeout expired|connection timed out|network is unreachable|server closed the connection' "$error_file"; then
               category="connessione_database_fallita"
-            elif grep -Eqi 'does not exist|not found' <<< "$output"; then
+            elif grep -Eqi 'SSL SYSCALL|certificate verify failed|TLS' "$error_file"; then
+              category="connessione_tls_fallita"
+            elif grep -Eqi 'no matching schemas were found|does not exist|not found' "$error_file"; then
               category="oggetto_database_mancante"
+            elif grep -Eqi 'docker:|manifest unknown|pull access denied|unable to find image' "$error_file"; then
+              category="runtime_container_fallito"
             fi
 
-            # Non stampare mai l'output grezzo: potrebbe contenere la connection
-            # string. La categoria e sufficiente per correggere il workflow.
+            # Non stampare mai stderr: libpq potrebbe includervi dettagli della
+            # connessione. Rimuovere anche l'eventuale dump parziale.
+            rm -f -- "$destination" "$error_file"
             echo "::error title=Dump ${label} fallito::Categoria: ${category}."
             return 1
           }
 
-          dump_or_fail schema \
-            --db-url "$SUPABASE_DB_URL" \
-            --file "$BACKUP_WORK_DIR/schema.sql"
+          docker pull "$PG_DUMP_IMAGE"
+          pg_dump_version="$(docker run --rm "$PG_DUMP_IMAGE" pg_dump --version)"
+          case "$pg_dump_version" in
+            "pg_dump (PostgreSQL) 17."*) ;;
+            *)
+              echo "::error title=Versione pg_dump non valida::Il backup richiede PostgreSQL 17."
+              exit 1
+              ;;
+          esac
 
-          dump_or_fail dati \
-            --db-url "$SUPABASE_DB_URL" \
-            --file "$BACKUP_WORK_DIR/data.sql" \
-            --use-copy \
+          dump_or_fail schema "$BACKUP_WORK_DIR/schema.sql" \
+            --schema-only \
+            --schema public \
+            --schema private
+
+          dump_or_fail dati "$BACKUP_WORK_DIR/data.sql" \
             --data-only \
-            --exclude "storage.buckets_vectors" \
-            --exclude "storage.vector_indexes"
+            --schema public \
+            --schema private \
+            --schema auth \
+            --schema storage \
+            --exclude-table-data auth.schema_migrations \
+            --exclude-table-data storage.migrations \
+            --exclude-table-data storage.buckets_vectors \
+            --exclude-table-data storage.vector_indexes
 
-          dump_or_fail storico-schema \
-            --db-url "$SUPABASE_DB_URL" \
-            --file "$BACKUP_WORK_DIR/history_schema.sql" \
+          dump_or_fail storico-schema "$BACKUP_WORK_DIR/history_schema.sql" \
+            --schema-only \
             --schema supabase_migrations
 
-          dump_or_fail storico-dati \
-            --db-url "$SUPABASE_DB_URL" \
-            --file "$BACKUP_WORK_DIR/history_data.sql" \
-            --use-copy \
+          dump_or_fail storico-dati "$BACKUP_WORK_DIR/history_data.sql" \
             --data-only \
             --schema supabase_migrations
 
@@ -222,14 +249,14 @@ jobs:
             fi
           done
 
-          cli_version="$(supabase --version)"
           {
-            echo "format_version=2"
+            echo "format_version=3"
             printf 'created_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             printf 'repository=%s\n' "$GITHUB_REPOSITORY"
             printf 'workflow_run_id=%s\n' "$GITHUB_RUN_ID"
             printf 'workflow_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
-            printf 'supabase_cli_version=%s\n' "$cli_version"
+            printf 'pg_dump_image=%s\n' "$PG_DUMP_IMAGE"
+            printf 'pg_dump_version=%s\n' "$pg_dump_version"
           } > "$BACKUP_WORK_DIR/manifest.txt"
 
           (
